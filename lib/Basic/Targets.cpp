@@ -4954,6 +4954,68 @@ namespace {
   };
 }
 
+namespace {
+  class Z80TargetInfo : public TargetInfo {
+    static const char *const GCCRegNames[];
+  public:
+    Z80TargetInfo(const std::string &triple) : TargetInfo(triple) {
+      BigEndian = false;
+      TLSSupported = false;
+      IntWidth = 16; IntAlign = 8;
+      LongWidth = 32; LongAlign = 8;
+      LongLongWidth = 64; LongLongAlign = 8;
+      PointerWidth = 16; PointerAlign = 8;
+      SizeType = UnsignedInt;
+      IntMaxType = SignedLong;
+      UIntMaxType = UnsignedLong;
+      IntPtrType = SignedShort;
+      PtrDiffType = SignedInt;
+      SigAtomicType = SignedLong;
+      DescriptionString = "e-p:16:8:8-i8:8:8-i16:8:8-n8:16";
+    }
+    virtual void getTargetDefines(const LangOptions &Opts,
+                                  MacroBuilder &Builder) const {
+      Builder.defineMacro("Z80");
+      Builder.defineMacro("__Z80__");
+    }
+    virtual void getTargetBuiltins(const Builtin::Info *&Records,
+                                   unsigned &NumRecords) const {
+      Records = 0;
+      NumRecords = 0;
+    }
+    virtual bool hasFeature(StringRef Feature) const {
+      return Feature == "z80";
+    }
+    virtual void getGCCRegNames(const char* const *&Names,
+                                unsigned &NumNames) const;
+    virtual void getGCCRegAliases(const GCCRegAlias *&Aliases,
+                                  unsigned &NumAliases) const {
+      Aliases = 0;
+      NumAliases = 0;
+    }
+    virtual bool validateAsmConstraint(const char *&Name,
+                                       TargetInfo::ConstraintInfo &info) const {
+      return false;
+    }
+    virtual const char* getClobbers() const {
+      return "";
+    }
+    virtual BuiltinVaListKind getBuiltinVaListKind() const {
+      return TargetInfo::CharPtrBuiltinVaList;
+    }
+  }; // end class Z80TargetInfo
+
+  const char* const Z80TargetInfo::GCCRegNames[] = {
+    "a", "b", "c", "d", "e", "h", "l", "xl", "xh", "yl", "yh",
+    "bc", "de", "hl", "ix", "iy", "sp", "pc"
+  };
+
+  void Z80TargetInfo::getGCCRegNames(const char* const *&Names,
+                                     unsigned &NumNames) const {
+    Names = GCCRegNames;
+    NumNames = llvm::array_lengthof(GCCRegNames);
+  }
+} // end namespace
 
 //===----------------------------------------------------------------------===//
 // Driver code
@@ -5223,6 +5285,8 @@ static TargetInfo *AllocateTarget(const std::string &T) {
         return NULL;
       return new SPIR64TargetInfo(T);
     }
+  case llvm::Triple::z80:
+    return new Z80TargetInfo(T);
   }
 }
 

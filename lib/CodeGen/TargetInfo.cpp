@@ -4810,6 +4810,59 @@ llvm::Value *HexagonABIInfo::EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
   return AddrTyped;
 }
 
+//===----------------------------------------------------------------------===//
+// Z80 ABI Implementation
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+  class Z80ABIInfo : public ABIInfo {
+  public:
+    Z80ABIInfo(CodeGenTypes &CGT) : ABIInfo(CGT) {}
+  private:
+    ABIArgInfo classifyReturnType(QualType RetTy) const;
+    ABIArgInfo classifyArgumentType(QualType Ty) const;
+
+    virtual void computeInfo(CGFunctionInfo &FI) const;
+
+    virtual llvm::Value *EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
+                                   CodeGenFunction &CGF) const;
+  }; // end class Z80ABIInfo
+
+  class Z80TargetCodeGenInfo : public TargetCodeGenInfo {
+  public:
+    Z80TargetCodeGenInfo(CodeGenTypes &CGT)
+      : TargetCodeGenInfo(new Z80ABIInfo(CGT)) {}
+  }; // end class Z80TargetCodeGenInfo
+} // end namespace
+
+void Z80ABIInfo::computeInfo(CGFunctionInfo &FI) const {
+  FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
+  for (CGFunctionInfo::arg_iterator it = FI.arg_begin(), ie = FI.arg_end();
+    it != ie; it++)
+    it->info = classifyArgumentType(it->type);
+}
+
+ABIArgInfo Z80ABIInfo::classifyArgumentType(QualType Ty) const {
+  if (isAggregateTypeForABI(Ty))
+    return ABIArgInfo::getIndirect(0);
+
+  return ABIArgInfo::getDirect();
+}
+
+ABIArgInfo Z80ABIInfo::classifyReturnType(QualType RetTy) const {
+  if (RetTy->isVoidType())
+    return ABIArgInfo::getIgnore();
+  if (isAggregateTypeForABI(RetTy))
+    return ABIArgInfo::getIndirect(0);
+  return ABIArgInfo::getDirect();
+}
+
+llvm::Value *Z80ABIInfo::EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
+  CodeGenFunction &CGF) const {
+  assert(0 && "Not implemented yet!");
+  return NULL;
+}
 
 const TargetCodeGenInfo &CodeGenModule::getTargetCodeGenInfo() {
   if (TheTargetCodeGenInfo)
@@ -4925,5 +4978,7 @@ const TargetCodeGenInfo &CodeGenModule::getTargetCodeGenInfo() {
   }
   case llvm::Triple::hexagon:
     return *(TheTargetCodeGenInfo = new HexagonTargetCodeGenInfo(Types));
+  case llvm::Triple::z80:
+    return *(TheTargetCodeGenInfo = new Z80TargetCodeGenInfo(Types));
   }
 }
