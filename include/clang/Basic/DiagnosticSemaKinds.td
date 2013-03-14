@@ -666,6 +666,15 @@ def warn_auto_synthesizing_protocol_property :Warning<
   "auto property synthesis will not synthesize property"
   " declared in a protocol">,
   InGroup<DiagGroup<"objc-protocol-property-synthesis">>;
+def warn_no_autosynthesis_shared_ivar_property : Warning <
+  "auto property synthesis will not synthesize property "
+  "'%0' because it cannot share an ivar with another synthesized property">,
+  InGroup<ObjCNoPropertyAuthoSynthesis>;
+def warn_no_autosynthesis_property : Warning<
+  "auto property synthesis will not synthesize property "
+  "'%0' because it is 'readwrite' but it will be synthesized 'readonly' "
+  "via another property">,
+  InGroup<ObjCNoPropertyAuthoSynthesis>;
 def warn_autosynthesis_property_ivar_match :Warning<
   "autosynthesized property %0 will use %select{|synthesized}1 instance variable "
   "%2, not existing instance variable %3">,
@@ -1672,6 +1681,8 @@ def err_attribute_argument_outof_range : Error<
 def err_init_priority_object_attr : Error<
   "can only use 'init_priority' attribute on file-scope definitions "
   "of objects of class type">;
+def err_attribute_argument_vec_type_hint : Error<
+  "invalid attribute argument %0 - expecting a vector or vectorizable scalar type">;
 def err_attribute_argument_n_not_int : Error<
   "'%0' attribute requires parameter %1 to be an integer constant">;
 def err_attribute_argument_n_not_string : Error<

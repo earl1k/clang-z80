@@ -895,16 +895,21 @@ CodeGenFunction::generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
     LValue LV = EmitLValueForIvar(TypeOfSelfObject(), LoadObjCSelf(), ivar, 0);
 
     QualType ivarType = ivar->getType();
-    if (ivarType->isAnyComplexType()) {
-      ComplexPairTy pair = LoadComplexFromAddr(LV.getAddress(),
-                                               LV.isVolatileQualified());
-      StoreComplexToAddr(pair, ReturnValue, LV.isVolatileQualified());
-    } else if (hasAggregateLLVMType(ivarType)) {
+    switch (getEvaluationKind(ivarType)) {
+    case TEK_Complex: {
+      ComplexPairTy pair = EmitLoadOfComplex(LV);
+      EmitStoreOfComplex(pair,
+                         MakeNaturalAlignAddrLValue(ReturnValue, ivarType),
+                         /*init*/ true);
+      return;
+    }
+    case TEK_Aggregate:
       // The return value slot is guaranteed to not be aliased, but
       // that's not necessarily the same as "on the stack", so
       // we still potentially need objc_memmove_collectable.
       EmitAggregateCopy(ReturnValue, LV.getAddress(), ivarType);
-    } else {
+      return;
+    case TEK_Scalar: {
       llvm::Value *value;
       if (propType->isReferenceType()) {
         value = LV.getAddress();
@@ -926,8 +931,10 @@ CodeGenFunction::generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
       }
       
       EmitReturnOfRValue(RValue::get(value), propType);
+      return;
     }
-    return;
+    }
+    llvm_unreachable("bad evaluation kind");
   }
 
   }
@@ -1679,7 +1686,8 @@ namespace {
     llvm::Value *object;
 
     void Emit(CodeGenFunction &CGF, Flags flags) {
-      CGF.EmitARCRelease(object, /*precise*/ true);
+      // Releases at the end of the full-expression are imprecise.
+      CGF.EmitARCRelease(object, ARCImpreciseLifetime);
     }
   };
 }
@@ -1732,9 +1740,8 @@ static llvm::Value *emitARCValueOperation(CodeGenFunction &CGF,
   if (isa<llvm::ConstantPointerNull>(value)) return value;
 
   if (!fn) {
-    std::vector<llvm::Type*> args(1, CGF.Int8PtrTy);
     llvm::FunctionType *fnType =
-      llvm::FunctionType::get(CGF.Int8PtrTy, args, false);
+      llvm::FunctionType::get(CGF.Int8PtrTy, CGF.Int8PtrTy, false);
     fn = createARCRuntimeFunction(CGF.CGM, fnType, fnName);
   }
 
@@ -1758,9 +1765,8 @@ static llvm::Value *emitARCLoadOperation(CodeGenFunction &CGF,
                                          llvm::Constant *&fn,
                                          StringRef fnName) {
   if (!fn) {
-    std::vector<llvm::Type*> args(1, CGF.Int8PtrPtrTy);
     llvm::FunctionType *fnType =
-      llvm::FunctionType::get(CGF.Int8PtrTy, args, false);
+      llvm::FunctionType::get(CGF.Int8PtrTy, CGF.Int8PtrPtrTy, false);
     fn = createARCRuntimeFunction(CGF.CGM, fnType, fnName);
   }
 
@@ -1821,7 +1827,8 @@ static void emitARCCopyOperation(CodeGenFunction &CGF,
   assert(dst->getType() == src->getType());
 
   if (!fn) {
-    std::vector<llvm::Type*> argTypes(2, CGF.Int8PtrPtrTy);
+    llvm::Type *argTypes[] = { CGF.Int8PtrPtrTy, CGF.Int8PtrPtrTy };
+
     llvm::FunctionType *fnType
       = llvm::FunctionType::get(CGF.Builder.getVoidTy(), argTypes, false);
     fn = createARCRuntimeFunction(CGF.CGM, fnType, fnName);
@@ -1934,14 +1941,14 @@ CodeGenFunction::EmitARCRetainAutoreleasedReturnValue(llvm::Value *value) {
 
 /// Release the given object.
 ///   call void \@objc_release(i8* %value)
-void CodeGenFunction::EmitARCRelease(llvm::Value *value, bool precise) {
+void CodeGenFunction::EmitARCRelease(llvm::Value *value,
+                                     ARCPreciseLifetime_t precise) {
   if (isa<llvm::ConstantPointerNull>(value)) return;
 
   llvm::Constant *&fn = CGM.getARCEntrypoints().objc_release;
   if (!fn) {
-    std::vector<llvm::Type*> args(1, Int8PtrTy);
     llvm::FunctionType *fnType =
-      llvm::FunctionType::get(Builder.getVoidTy(), args, false);
+      llvm::FunctionType::get(Builder.getVoidTy(), Int8PtrTy, false);
     fn = createARCRuntimeFunction(CGM, fnType, "objc_release");
   }
 
@@ -1951,7 +1958,7 @@ void CodeGenFunction::EmitARCRelease(llvm::Value *value, bool precise) {
   // Call objc_release.
   llvm::CallInst *call = EmitNounwindRuntimeCall(fn, value);
 
-  if (!precise) {
+  if (precise == ARCImpreciseLifetime) {
     SmallVector<llvm::Value*,1> args;
     call->setMetadata("clang.imprecise_release",
                       llvm::MDNode::get(Builder.getContext(), args));
@@ -1967,7 +1974,8 @@ void CodeGenFunction::EmitARCRelease(llvm::Value *value, bool precise) {
 /// At -O1 and above, just load and call objc_release.
 ///
 ///   call void \@objc_storeStrong(i8** %addr, i8* null)
-void CodeGenFunction::EmitARCDestroyStrong(llvm::Value *addr, bool precise) {
+void CodeGenFunction::EmitARCDestroyStrong(llvm::Value *addr,
+                                           ARCPreciseLifetime_t precise) {
   if (CGM.getCodeGenOpts().OptimizationLevel == 0) {
     llvm::PointerType *addrTy = cast<llvm::PointerType>(addr->getType());
     llvm::Value *null = llvm::ConstantPointerNull::get(
@@ -2037,7 +2045,7 @@ llvm::Value *CodeGenFunction::EmitARCStoreStrong(LValue dst,
   EmitStoreOfScalar(newValue, dst);
 
   // Finally, release the old value.
-  EmitARCRelease(oldValue, /*precise*/ false);
+  EmitARCRelease(oldValue, dst.isARCPreciseLifetime());
 
   return newValue;
 }
@@ -2148,9 +2156,8 @@ void CodeGenFunction::EmitARCInitWeak(llvm::Value *addr, llvm::Value *value) {
 void CodeGenFunction::EmitARCDestroyWeak(llvm::Value *addr) {
   llvm::Constant *&fn = CGM.getARCEntrypoints().objc_destroyWeak;
   if (!fn) {
-    std::vector<llvm::Type*> args(1, Int8PtrPtrTy);
     llvm::FunctionType *fnType =
-      llvm::FunctionType::get(Builder.getVoidTy(), args, false);
+      llvm::FunctionType::get(Builder.getVoidTy(), Int8PtrPtrTy, false);
     fn = createARCRuntimeFunction(CGM, fnType, "objc_destroyWeak");
   }
 
@@ -2198,9 +2205,8 @@ void CodeGenFunction::EmitObjCAutoreleasePoolPop(llvm::Value *value) {
 
   llvm::Constant *&fn = CGM.getRREntrypoints().objc_autoreleasePoolPop;
   if (!fn) {
-    std::vector<llvm::Type*> args(1, Int8PtrTy);
     llvm::FunctionType *fnType =
-      llvm::FunctionType::get(Builder.getVoidTy(), args, false);
+      llvm::FunctionType::get(Builder.getVoidTy(), Int8PtrTy, false);
 
     // We don't want to use a weak import here; instead we should not
     // fall into this path.
@@ -2251,13 +2257,13 @@ void CodeGenFunction::EmitObjCMRRAutoreleasePoolPop(llvm::Value *Arg) {
 void CodeGenFunction::destroyARCStrongPrecise(CodeGenFunction &CGF,
                                               llvm::Value *addr,
                                               QualType type) {
-  CGF.EmitARCDestroyStrong(addr, /*precise*/ true);
+  CGF.EmitARCDestroyStrong(addr, ARCPreciseLifetime);
 }
 
 void CodeGenFunction::destroyARCStrongImprecise(CodeGenFunction &CGF,
                                                 llvm::Value *addr,
                                                 QualType type) {
-  CGF.EmitARCDestroyStrong(addr, /*precise*/ false);
+  CGF.EmitARCDestroyStrong(addr, ARCImpreciseLifetime);
 }
 
 void CodeGenFunction::destroyARCWeak(CodeGenFunction &CGF,
@@ -2734,7 +2740,7 @@ CodeGenFunction::EmitARCStoreStrong(const BinaryOperator *e,
     llvm::Value *oldValue =
       EmitLoadOfScalar(lvalue);
     EmitStoreOfScalar(value, lvalue);
-    EmitARCRelease(oldValue, /*precise*/ false);
+    EmitARCRelease(oldValue, lvalue.isARCPreciseLifetime());
   } else {
     value = EmitARCStoreStrong(lvalue, value, ignored);
   }

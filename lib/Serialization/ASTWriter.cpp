@@ -1384,14 +1384,15 @@ namespace {
   // Trait used for the on-disk hash table of header search information.
   class HeaderFileInfoTrait {
     ASTWriter &Writer;
+    const HeaderSearch &HS;
     
     // Keep track of the framework names we've used during serialization.
     SmallVector<char, 128> FrameworkStringData;
     llvm::StringMap<unsigned> FrameworkNameOffset;
     
   public:
-    HeaderFileInfoTrait(ASTWriter &Writer)
-      : Writer(Writer) { }
+    HeaderFileInfoTrait(ASTWriter &Writer, const HeaderSearch &HS)
+      : Writer(Writer), HS(HS) { }
     
     struct key_type {
       const FileEntry *FE;
@@ -1415,6 +1416,8 @@ namespace {
       unsigned KeyLen = strlen(key.Filename) + 1 + 8 + 8;
       clang::io::Emit16(Out, KeyLen);
       unsigned DataLen = 1 + 2 + 4 + 4;
+      if (Data.isModuleHeader)
+        DataLen += 4;
       clang::io::Emit8(Out, DataLen);
       return std::make_pair(KeyLen, DataLen);
     }
@@ -1427,7 +1430,7 @@ namespace {
       Out.write(key.Filename, KeyLen);
     }
     
-    void EmitData(raw_ostream &Out, key_type_ref,
+    void EmitData(raw_ostream &Out, key_type_ref key,
                   data_type_ref Data, unsigned DataLen) {
       using namespace clang::io;
       uint64_t Start = Out.tell(); (void)Start;
@@ -1461,7 +1464,12 @@ namespace {
           Offset = Pos->second;
       }
       Emit32(Out, Offset);
-      
+
+      if (Data.isModuleHeader) {
+        Module *Mod = HS.findModuleForHeader(key.FE);
+        Emit32(Out, Writer.getExistingSubmoduleID(Mod));
+      }
+
       assert(Out.tell() - Start == DataLen && "Wrong data length");
     }
     
@@ -1480,7 +1488,7 @@ void ASTWriter::WriteHeaderSearch(const HeaderSearch &HS, StringRef isysroot) {
   if (FilesByUID.size() > HS.header_file_size())
     FilesByUID.resize(HS.header_file_size());
   
-  HeaderFileInfoTrait GeneratorTrait(*this);
+  HeaderFileInfoTrait GeneratorTrait(*this, HS);
   OnDiskChainedHashTableGenerator<HeaderFileInfoTrait> Generator;  
   SmallVector<const char *, 4> SavedStrings;
   unsigned NumHeaderSearchEntries = 0;
@@ -2020,6 +2028,18 @@ unsigned ASTWriter::getSubmoduleID(Module *Mod) {
   return SubmoduleIDs[Mod] = NextSubmoduleID++;
 }
 
+unsigned ASTWriter::getExistingSubmoduleID(Module *Mod) const {
+  if (!Mod)
+    return 0;
+
+  llvm::DenseMap<Module *, unsigned>::const_iterator
+    Known = SubmoduleIDs.find(Mod);
+  if (Known != SubmoduleIDs.end())
+    return Known->second;
+
+  return 0;
+}
+
 /// \brief Compute the number of modules within the given tree (including the
 /// given module).
 static unsigned getNumberOfModules(Module *Mod) {
@@ -2170,11 +2190,13 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
       Stream.EmitRecordWithBlob(ExcludedHeaderAbbrev, Record, 
                                 Mod->ExcludedHeaders[I]->getName());
     }
-    for (unsigned I = 0, N = Mod->TopHeaders.size(); I != N; ++I) {
+    ArrayRef<const FileEntry *>
+      TopHeaders = Mod->getTopHeaders(PP->getFileManager());
+    for (unsigned I = 0, N = TopHeaders.size(); I != N; ++I) {
       Record.clear();
       Record.push_back(SUBMODULE_TOPHEADER);
       Stream.EmitRecordWithBlob(TopHeaderAbbrev, Record,
-                                Mod->TopHeaders[I]->getName());
+                                TopHeaders[I]->getName());
     }
 
     // Emit the imports. 
@@ -3442,6 +3464,8 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
                              Module *WritingModule) {
   using namespace llvm;
 
+  bool isModule = WritingModule != 0;
+
   // Make sure that the AST reader knows to finalize itself.
   if (Chain)
     Chain->finalizeForWriting();
@@ -3507,13 +3531,15 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
   
   // Build a record containing all of the file scoped decls in this file.
   RecordData UnusedFileScopedDecls;
-  AddLazyVectorDecls(*this, SemaRef.UnusedFileScopedDecls, 
-                     UnusedFileScopedDecls);
+  if (!isModule)
+    AddLazyVectorDecls(*this, SemaRef.UnusedFileScopedDecls,
+                       UnusedFileScopedDecls);
 
   // Build a record containing all of the delegating constructors we still need
   // to resolve.
   RecordData DelegatingCtorDecls;
-  AddLazyVectorDecls(*this, SemaRef.DelegatingCtorDecls, DelegatingCtorDecls);
+  if (!isModule)
+    AddLazyVectorDecls(*this, SemaRef.DelegatingCtorDecls, DelegatingCtorDecls);
 
   // Write the set of weak, undeclared identifiers. We always write the
   // entire table, since later PCH files in a PCH chain are only interested in
@@ -3748,11 +3774,11 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
     Stream.EmitRecordWithBlob(ModuleOffsetMapAbbrev, Record,
                               Buffer.data(), Buffer.size());
   }
-  WritePreprocessor(PP, WritingModule != 0);
+  WritePreprocessor(PP, isModule);
   WriteHeaderSearch(PP.getHeaderSearchInfo(), isysroot);
   WriteSelectors(SemaRef);
   WriteReferencedSelectorsPool(SemaRef);
-  WriteIdentifierTable(PP, SemaRef.IdResolver, WritingModule != 0);
+  WriteIdentifierTable(PP, SemaRef.IdResolver, isModule);
   WriteFPPragmaOptions(SemaRef.getFPOptions());
   WriteOpenCLExtensions(SemaRef);
 

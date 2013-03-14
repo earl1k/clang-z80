@@ -1337,7 +1337,7 @@ HeaderFileInfoTrait::ReadKey(const unsigned char *d, unsigned) {
 }
 
 HeaderFileInfoTrait::data_type 
-HeaderFileInfoTrait::ReadData(internal_key_ref, const unsigned char *d,
+HeaderFileInfoTrait::ReadData(internal_key_ref key, const unsigned char *d,
                               unsigned DataLen) {
   const unsigned char *End = d + DataLen;
   using namespace clang::io;
@@ -1358,6 +1358,21 @@ HeaderFileInfoTrait::ReadData(internal_key_ref, const unsigned char *d,
     HFI.Framework = HS->getUniqueFrameworkName(FrameworkName);
   }
   
+  if (d != End) {
+    uint32_t LocalSMID = ReadUnalignedLE32(d);
+    if (LocalSMID) {
+      // This header is part of a module. Associate it with the module to enable
+      // implicit module import.
+      SubmoduleID GlobalSMID = Reader.getGlobalSubmoduleID(M, LocalSMID);
+      Module *Mod = Reader.getSubmodule(GlobalSMID);
+      HFI.isModuleHeader = true;
+      FileManager &FileMgr = Reader.getFileManager();
+      ModuleMap &ModMap =
+          Reader.getPreprocessor().getHeaderSearchInfo().getModuleMap();
+      ModMap.addHeader(Mod, FileMgr.getFile(key.Filename), /*Excluded=*/false);
+    }
+  }
+
   assert(End == d && "Wrong data length in HeaderFileInfo deserialization");
   (void)End;
         
@@ -1602,7 +1617,7 @@ InputFile ASTReader::getInputFile(ModuleFile &F, unsigned ID, bool Complain) {
 #endif
          )) {
       if (Complain)
-        Error(diag::err_fe_pch_file_modified, Filename);
+        Error(diag::err_fe_pch_file_modified, Filename, F.FileName);
       IsOutOfDate = true;
     }
 
@@ -3508,13 +3523,9 @@ bool ASTReader::ReadSubmoduleBlock(ModuleFile &F) {
       if (!CurrentModule)
         break;
       
-      // FIXME: Be more lazy about this!
-      if (const FileEntry *File = PP.getFileManager().getFile(Blob)) {
-        if (std::find(CurrentModule->Headers.begin(), 
-                      CurrentModule->Headers.end(), 
-                      File) == CurrentModule->Headers.end())
-          ModMap.addHeader(CurrentModule, File, false);
-      }
+      // We lazily associate headers with their modules via the HeaderInfoTable.
+      // FIXME: Re-evaluate this section; maybe only store InputFile IDs instead
+      // of complete filenames or remove it entirely.
       break;      
     }
 
@@ -3527,13 +3538,9 @@ bool ASTReader::ReadSubmoduleBlock(ModuleFile &F) {
       if (!CurrentModule)
         break;
       
-      // FIXME: Be more lazy about this!
-      if (const FileEntry *File = PP.getFileManager().getFile(Blob)) {
-        if (std::find(CurrentModule->Headers.begin(), 
-                      CurrentModule->Headers.end(), 
-                      File) == CurrentModule->Headers.end())
-          ModMap.addHeader(CurrentModule, File, true);
-      }
+      // We lazily associate headers with their modules via the HeaderInfoTable.
+      // FIXME: Re-evaluate this section; maybe only store InputFile IDs instead
+      // of complete filenames or remove it entirely.
       break;      
     }
 
@@ -3546,9 +3553,7 @@ bool ASTReader::ReadSubmoduleBlock(ModuleFile &F) {
       if (!CurrentModule)
         break;
 
-      // FIXME: Be more lazy about this!
-      if (const FileEntry *File = PP.getFileManager().getFile(Blob))
-        CurrentModule->TopHeaders.insert(File);
+      CurrentModule->addTopHeaderFilename(Blob);
       break;
     }
 
@@ -4000,7 +4005,7 @@ ASTReader::findBeginPreprocessedEntity(SourceLocation BLoc) const {
 
   GlobalSLocOffsetMapType::const_iterator
     SLocMapI = GlobalSLocOffsetMap.find(SourceManager::MaxLoadedOffset -
-                                        BLoc.getOffset());
+                                        BLoc.getOffset() - 1);
   assert(SLocMapI != GlobalSLocOffsetMap.end() &&
          "Corrupted global sloc offset map");
 
@@ -4048,7 +4053,7 @@ ASTReader::findEndPreprocessedEntity(SourceLocation ELoc) const {
 
   GlobalSLocOffsetMapType::const_iterator
     SLocMapI = GlobalSLocOffsetMap.find(SourceManager::MaxLoadedOffset -
-                                        ELoc.getOffset());
+                                        ELoc.getOffset() - 1);
   assert(SLocMapI != GlobalSLocOffsetMap.end() &&
          "Corrupted global sloc offset map");
 
@@ -4395,8 +4400,7 @@ QualType ASTReader::readTypeRecord(unsigned Index) {
     } else if (EST == EST_Unevaluated) {
       EPI.ExceptionSpecDecl = ReadDeclAs<FunctionDecl>(*Loc.F, Record, Idx);
     }
-    return Context.getFunctionType(ResultType, ParamTypes.data(), NumParams,
-                                    EPI);
+    return Context.getFunctionType(ResultType, ParamTypes, EPI);
   }
 
   case TYPE_UNRESOLVED_USING: {

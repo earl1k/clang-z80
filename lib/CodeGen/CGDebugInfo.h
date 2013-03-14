@@ -66,6 +66,9 @@ class CGDebugInfo {
   llvm::DenseMap<void *, std::pair<llvm::WeakVH, unsigned > >
     ObjCInterfaceCache;
 
+  /// RetainedTypes - list of interfaces we want to keep even if orphaned.
+  std::vector<void *> RetainedTypes;
+
   /// CompleteTypeCache - Cache of previously constructed complete RecordTypes.
   llvm::DenseMap<void *, llvm::WeakVH> CompletedTypeCache;
 
@@ -131,6 +134,7 @@ class CGDebugInfo {
                                      const Type *Ty, QualType PointeeTy,
                                      llvm::DIFile F);
 
+  llvm::Value *getCachedInterfaceTypeOrNull(const QualType Ty);
   llvm::DIType getOrCreateStructPtrType(StringRef Name, llvm::DIType &Cache);
 
   llvm::DISubprogram CreateCXXMemberFunction(const CXXMethodDecl *Method,
@@ -203,7 +207,9 @@ public:
 
   /// EmitLocation - Emit metadata to indicate a change in line/column
   /// information in the source file.
-  void EmitLocation(CGBuilderTy &Builder, SourceLocation Loc);
+  /// \param ForceColumnInfo  Assume DebugColumnInfo option is true.
+  void EmitLocation(CGBuilderTy &Builder, SourceLocation Loc,
+                    bool ForceColumnInfo = false);
 
   /// EmitFunctionStart - Emit a call to llvm.dbg.function.start to indicate
   /// start of a new function.
@@ -352,7 +358,8 @@ private:
 
   /// getColumnNumber - Get column number for the location. If location is 
   /// invalid then use current location.
-  unsigned getColumnNumber(SourceLocation Loc);
+  /// \param Force  Assume DebugColumnInfo option is true.
+  unsigned getColumnNumber(SourceLocation Loc, bool Force=false);
 };
 } // namespace CodeGen
 } // namespace clang

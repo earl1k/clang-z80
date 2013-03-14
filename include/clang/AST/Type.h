@@ -1774,8 +1774,9 @@ public:
   /// \brief Determine the linkage and visibility of this type.
   LinkageInfo getLinkageAndVisibility() const;
 
-  /// \brief Note that the linkage is no longer known.
-  void ClearLinkageCache();
+  /// \brief True if the computed linkage is valid. Used for consistency
+  /// checking. Should always return true.
+  bool isLinkageValid() const;
 
   const char *getTypeClassName() const;
 
@@ -2797,7 +2798,7 @@ private:
     return false;
   }
 
-  FunctionProtoType(QualType result, const QualType *args, unsigned numArgs,
+  FunctionProtoType(QualType result, ArrayRef<QualType> args,
                     QualType canonical, const ExtProtoInfo &epi);
 
   /// NumArgs - The number of arguments this function has, not counting '...'.
