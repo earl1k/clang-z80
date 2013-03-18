@@ -128,16 +128,14 @@ public:
       if (Tok.Parent != NULL || !Comments.empty()) {
         if (Style.ColumnLimit >=
             Spaces + WhitespaceStartColumn + Tok.FormatTok.TokenLength) {
-          Comments.push_back(StoredComment());
-          Comments.back().Tok = Tok.FormatTok;
-          Comments.back().Spaces = Spaces;
-          Comments.back().NewLines = NewLines;
-          if (NewLines == 0)
-            Comments.back().MinColumn = WhitespaceStartColumn + Spaces;
-          else
-            Comments.back().MinColumn = Spaces;
-          Comments.back().MaxColumn =
-              Style.ColumnLimit - Tok.FormatTok.TokenLength;
+          StoredComment Comment;
+          Comment.Tok = Tok.FormatTok;
+          Comment.Spaces = Spaces;
+          Comment.NewLines = NewLines;
+          Comment.MinColumn =
+              NewLines > 0 ? Spaces : WhitespaceStartColumn + Spaces;
+          Comment.MaxColumn = Style.ColumnLimit - Tok.FormatTok.TokenLength;
+          Comments.push_back(Comment);
           return;
         }
       }
@@ -146,6 +144,10 @@ public:
     // If this line does not have a trailing comment, align the stored comments.
     if (Tok.Children.empty() && !isTrailingComment(Tok))
       alignComments();
+
+    if (Tok.Type == TT_BlockComment)
+      indentBlockComment(Tok.FormatTok, Spaces);
+
     storeReplacement(Tok.FormatTok, getNewLineText(NewLines, Spaces));
   }
 
@@ -191,6 +193,36 @@ public:
   }
 
 private:
+  void indentBlockComment(const FormatToken &Tok, int Indent) {
+    SourceLocation TokenLoc = Tok.Tok.getLocation();
+    int IndentDelta = Indent - SourceMgr.getSpellingColumnNumber(TokenLoc) + 1;
+    const char *Start = SourceMgr.getCharacterData(TokenLoc);
+    const char *Current = Start;
+    const char *TokEnd = Current + Tok.TokenLength;
+    llvm::SmallVector<SourceLocation, 16> LineStarts;
+    while (Current < TokEnd) {
+      if (*Current == '\n') {
+        ++Current;
+        LineStarts.push_back(TokenLoc.getLocWithOffset(Current - Start));
+        // If we need to outdent the line, check that it's indented enough.
+        for (int i = 0; i < -IndentDelta; ++i, ++Current)
+          if (Current >= TokEnd || *Current != ' ')
+            return;
+      } else {
+        ++Current;
+      }
+    }
+
+    for (size_t i = 0; i < LineStarts.size(); ++i) {
+      if (IndentDelta > 0)
+        Replaces.insert(tooling::Replacement(SourceMgr, LineStarts[i], 0,
+                                             std::string(IndentDelta, ' ')));
+      else if (IndentDelta < 0)
+        Replaces.insert(
+            tooling::Replacement(SourceMgr, LineStarts[i], -IndentDelta, ""));
+    }
+  }
+
   std::string getNewLineText(unsigned NewLines, unsigned Spaces) {
     return std::string(NewLines, '\n') + std::string(Spaces, ' ');
   }
@@ -227,8 +259,7 @@ private:
     unsigned MinColumn = 0;
     unsigned MaxColumn = UINT_MAX;
     comment_iterator Start = Comments.begin();
-    for (comment_iterator I = Comments.begin(), E = Comments.end(); I != E;
-         ++I) {
+    for (comment_iterator I = Start, E = Comments.end(); I != E; ++I) {
       if (I->MinColumn > MaxColumn || I->MaxColumn < MinColumn) {
         alignComments(Start, I, MinColumn);
         MinColumn = I->MinColumn;
@@ -553,8 +584,6 @@ private:
 
       State.Stack.back().LastSpace = State.Column;
       State.StartOfLineLevel = State.ParenLevel;
-      if (Current.is(tok::colon) && Current.Type != TT_ConditionalExpr)
-        State.Stack.back().Indent += 2;
 
       // Any break on this level means that the parent level has been broken
       // and we need to avoid bin packing there.
@@ -956,14 +985,6 @@ private:
         !(State.NextToken->is(tok::r_brace) &&
           State.Stack.back().BreakBeforeClosingBrace))
       return false;
-    // This prevents breaks like:
-    //   ...
-    //   SomeParameter, OtherParameter).DoSomething(
-    //   ...
-    // As they hide "DoSomething" and generally bad for readability.
-    if (State.NextToken->Parent->is(tok::l_paren) &&
-        State.ParenLevel <= State.StartOfLineLevel)
-      return false;
     // Trying to insert a parameter on a new line if there are already more than
     // one parameter on the current line is bin packing.
     if (State.Stack.back().HasMultiParameterLine &&
@@ -1000,7 +1021,25 @@ private:
          (State.NextToken->Parent->ClosesTemplateDeclaration &&
           State.ParenLevel == 0)))
       return true;
+    if (State.NextToken->Type == TT_InlineASMColon)
+      return true;
+    // This prevents breaks like:
+    //   ...
+    //   SomeParameter, OtherParameter).DoSomething(
+    //   ...
+    // As they hide "DoSomething" and generally bad for readability.
+    if (State.NextToken->isOneOf(tok::period, tok::arrow) &&
+        getRemainingLength(State) + State.Column > getColumnLimit() &&
+        State.ParenLevel < State.StartOfLineLevel)
+      return true;
     return false;
+  }
+
+  // Returns the total number of columns required for the remaining tokens.
+  unsigned getRemainingLength(const LineState &State) {
+    if (State.NextToken && State.NextToken->Parent)
+      return Line.Last->TotalLength - State.NextToken->Parent->TotalLength;
+    return 0;
   }
 
   FormatStyle Style;

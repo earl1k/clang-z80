@@ -92,14 +92,14 @@ public:
                    IdentifierInfo &Ident_in)
       : SourceMgr(SourceMgr), Lex(Lex), Line(Line), CurrentToken(&Line.First),
         KeywordVirtualFound(false), Ident_in(Ident_in) {
-    Contexts.push_back(Context(1, /*IsExpression=*/ false));
+    Contexts.push_back(Context(tok::unknown, 1, /*IsExpression=*/ false));
   }
 
 private:
   bool parseAngle() {
     if (CurrentToken == NULL)
       return false;
-    ScopedContextCreator ContextCreator(*this, 10);
+    ScopedContextCreator ContextCreator(*this, tok::less, 10);
     AnnotatedToken *Left = CurrentToken->Parent;
     Contexts.back().IsExpression = false;
     while (CurrentToken != NULL) {
@@ -124,7 +124,7 @@ private:
   bool parseParens(bool LookForDecls = false) {
     if (CurrentToken == NULL)
       return false;
-    ScopedContextCreator ContextCreator(*this, 1);
+    ScopedContextCreator ContextCreator(*this, tok::l_paren, 1);
 
     // FIXME: This is a bit of a hack. Do better.
     Contexts.back().ColonIsForRangeExpr =
@@ -205,7 +205,7 @@ private:
          Parent->Type == TT_CastRParen ||
          getBinOpPrecedence(Parent->FormatTok.Tok.getKind(), true, true) >
          prec::Unknown);
-    ScopedContextCreator ContextCreator(*this, 10);
+    ScopedContextCreator ContextCreator(*this, tok::l_square, 10);
     Contexts.back().IsExpression = true;
     bool StartsObjCArrayLiteral = Parent && Parent->is(tok::at);
 
@@ -256,7 +256,7 @@ private:
     // Lines are fine to end with '{'.
     if (CurrentToken == NULL)
       return true;
-    ScopedContextCreator ContextCreator(*this, 1);
+    ScopedContextCreator ContextCreator(*this, tok::l_brace, 1);
     AnnotatedToken *Left = CurrentToken->Parent;
     while (CurrentToken != NULL) {
       if (CurrentToken->is(tok::r_brace)) {
@@ -320,7 +320,7 @@ private:
       break;
     case tok::colon:
       // Colons from ?: are handled in parseConditional().
-      if (Tok->Parent->is(tok::r_paren)) {
+      if (Tok->Parent->is(tok::r_paren) && Contexts.size() == 1) {
         Tok->Type = TT_CtorInitializerColon;
       } else if (Contexts.back().ColonIsObjCMethodExpr ||
                  Line.First.Type == TT_ObjCMethodSpecifier) {
@@ -336,6 +336,8 @@ private:
         Tok->Type = TT_RangeBasedForLoopColon;
       } else if (Contexts.size() == 1) {
         Tok->Type = TT_InheritanceColon;
+      } else if (Contexts.back().ContextKind == tok::l_paren) {
+        Tok->Type = TT_InlineASMColon;
       }
       break;
     case tok::kw_if:
@@ -531,12 +533,14 @@ private:
   /// \brief A struct to hold information valid in a specific context, e.g.
   /// a pair of parenthesis.
   struct Context {
-    Context(unsigned BindingStrength, bool IsExpression)
-        : BindingStrength(BindingStrength), LongestObjCSelectorName(0),
-          ColonIsForRangeExpr(false), ColonIsObjCMethodExpr(false),
-          FirstObjCSelectorName(NULL), IsExpression(IsExpression),
-          CanBeExpression(true) {}
+    Context(tok::TokenKind ContextKind, unsigned BindingStrength,
+            bool IsExpression)
+        : ContextKind(ContextKind), BindingStrength(BindingStrength),
+          LongestObjCSelectorName(0), ColonIsForRangeExpr(false),
+          ColonIsObjCMethodExpr(false), FirstObjCSelectorName(NULL),
+          IsExpression(IsExpression), CanBeExpression(true) {}
 
+    tok::TokenKind ContextKind;
     unsigned BindingStrength;
     unsigned LongestObjCSelectorName;
     bool ColonIsForRangeExpr;
@@ -551,9 +555,12 @@ private:
   struct ScopedContextCreator {
     AnnotatingParser &P;
 
-    ScopedContextCreator(AnnotatingParser &P, unsigned Increase) : P(P) {
-      P.Contexts.push_back(Context(P.Contexts.back().BindingStrength + Increase,
-                                   P.Contexts.back().IsExpression));
+    ScopedContextCreator(AnnotatingParser &P, tok::TokenKind ContextKind,
+                         unsigned Increase)
+        : P(P) {
+      P.Contexts.push_back(
+          Context(ContextKind, P.Contexts.back().BindingStrength + Increase,
+                  P.Contexts.back().IsExpression));
     }
 
     ~ScopedContextCreator() { P.Contexts.pop_back(); }
@@ -661,7 +668,7 @@ private:
       return TT_PointerOrReference;
 
     if (PrevToken->isOneOf(tok::l_paren, tok::l_square, tok::l_brace,
-                           tok::comma, tok::kw_return, tok::colon,
+                           tok::comma, tok::semi, tok::kw_return, tok::colon,
                            tok::equal) ||
         PrevToken->Type == TT_BinaryOperator ||
         PrevToken->Type == TT_UnaryOperator || PrevToken->Type == TT_CastRParen)
@@ -755,7 +762,8 @@ public:
       if (Current) {
         if (Current->Type == TT_ConditionalExpr)
           CurrentPrecedence = 1 + (int) prec::Conditional;
-        else if (Current->is(tok::semi))
+        else if (Current->is(tok::semi) || Current->Type == TT_InlineASMColon ||
+                 Current->Type == TT_CtorInitializerColon)
           CurrentPrecedence = 1;
         else if (Current->Type == TT_BinaryOperator || Current->is(tok::comma))
           CurrentPrecedence = 1 + (int) getPrecedence(*Current);
@@ -926,10 +934,11 @@ unsigned TokenAnnotator::splitPenalty(const AnnotatedLine &Line,
 
   if (Right.is(tok::lessless)) {
     if (Left.is(tok::string_literal)) {
-      char LastChar =
-          StringRef(Left.FormatTok.Tok.getLiteralData(),
-                    Left.FormatTok.TokenLength).drop_back(1).rtrim().back();
-      if (LastChar == ':' || LastChar == '=')
+      StringRef Content = StringRef(Left.FormatTok.Tok.getLiteralData(),
+                                    Left.FormatTok.TokenLength);
+      Content = Content.drop_back(1).drop_front(1).trim();
+      if (Content.size() > 1 &&
+          (Content.back() == ':' || Content.back() == '='))
         return 100;
     }
     return prec::Shift;
@@ -1111,12 +1120,12 @@ bool TokenAnnotator::canBreakBefore(const AnnotatedLine &Line,
       Left.Parent->is(tok::r_paren))
     return !Right.isOneOf(tok::l_brace, tok::semi, tok::equal);
 
+  if (Right.is(tok::kw___attribute))
+    return true;
+
   // We only break before r_brace if there was a corresponding break before
   // the l_brace, which is tracked by BreakBeforeClosingBrace.
-  if (Right.is(tok::r_brace))
-    return false;
-
-  if (Right.isOneOf(tok::r_paren, tok::greater))
+  if (Right.isOneOf(tok::r_brace, tok::r_paren, tok::greater))
     return false;
   if (Left.is(tok::identifier) && Right.is(tok::string_literal))
     return true;
