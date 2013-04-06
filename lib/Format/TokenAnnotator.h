@@ -76,8 +76,8 @@ public:
         ClosesTemplateDeclaration(false), MatchingParen(NULL),
         ParameterCount(0), BindingStrength(0), SplitPenalty(0),
         LongestObjCSelectorName(0), Parent(NULL), FakeLParens(0),
-        FakeRParens(0), LastInChainOfCalls(false) {
-  }
+        FakeRParens(0), LastInChainOfCalls(false),
+        PartOfMultiVariableDeclStmt(false) {}
 
   bool is(tok::TokenKind Kind) const { return FormatTok.Tok.is(Kind); }
 
@@ -105,6 +105,20 @@ public:
 
   bool isObjCAtKeyword(tok::ObjCKeywordKind Kind) const {
     return FormatTok.Tok.isObjCAtKeyword(Kind);
+  }
+
+  bool isAccessSpecifier(bool ColonRequired = true) const {
+    return isOneOf(tok::kw_public, tok::kw_protected, tok::kw_private) &&
+           (!ColonRequired ||
+            (!Children.empty() && Children[0].is(tok::colon)));
+  }
+
+  bool isObjCAccessSpecifier() const {
+    return is(tok::at) && !Children.empty() &&
+           (Children[0].isObjCAtKeyword(tok::objc_public) ||
+            Children[0].isObjCAtKeyword(tok::objc_protected) ||
+            Children[0].isObjCAtKeyword(tok::objc_package) ||
+            Children[0].isObjCAtKeyword(tok::objc_private));
   }
 
   FormatToken FormatTok;
@@ -151,6 +165,11 @@ public:
 
   /// \brief Is this the last "." or "->" in a builder-type call?
   bool LastInChainOfCalls;
+
+  /// \brief Is this token part of a \c DeclStmt defining multiple variables?
+  ///
+  /// Only set if \c Type == \c TT_StartOfName.
+  bool PartOfMultiVariableDeclStmt;
 
   const AnnotatedToken *getPreviousNoneComment() const {
     AnnotatedToken *Tok = Parent;

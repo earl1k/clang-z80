@@ -238,7 +238,7 @@ static ObjCMethodDecl *getNSNumberFactoryMethod(Sema &S, SourceLocation Loc,
                                              SourceLocation(), SourceLocation(),
                                              &CX.Idents.get("value"),
                                              NumberType, /*TInfo=*/0, SC_None,
-                                             SC_None, 0);
+                                             0);
     Method->setMethodParams(S.Context, value, ArrayRef<SourceLocation>());
   }
 
@@ -489,7 +489,7 @@ ExprResult Sema::BuildObjCBoxedExpr(SourceRange SR, Expr *ValueExpr) {
                                 &Context.Idents.get("value"),
                                 Context.getPointerType(ConstCharType),
                                 /*TInfo=*/0,
-                                SC_None, SC_None, 0);
+                                SC_None, 0);
           M->setMethodParams(Context, value, ArrayRef<SourceLocation>());
           BoxingMethod = M;
         }
@@ -656,16 +656,14 @@ ExprResult Sema::BuildObjCArrayLiteral(SourceRange SR, MultiExprArg Elements) {
                                                  SourceLocation(),
                                                  &Context.Idents.get("objects"),
                                                  Context.getPointerType(IdT),
-                                                 /*TInfo=*/0, SC_None, SC_None,
-                                                 0);
+                                                 /*TInfo=*/0, SC_None, 0);
       Params.push_back(objects);
       ParmVarDecl *cnt = ParmVarDecl::Create(Context, Method,
                                              SourceLocation(),
                                              SourceLocation(),
                                              &Context.Idents.get("cnt"),
                                              Context.UnsignedLongTy,
-                                             /*TInfo=*/0, SC_None, SC_None,
-                                             0);
+                                             /*TInfo=*/0, SC_None, 0);
       Params.push_back(cnt);
       Method->setMethodParams(Context, Params, ArrayRef<SourceLocation>());
     }
@@ -774,24 +772,21 @@ ExprResult Sema::BuildObjCDictionaryLiteral(SourceRange SR,
                                                  SourceLocation(),
                                                  &Context.Idents.get("objects"),
                                                  Context.getPointerType(IdT),
-                                                 /*TInfo=*/0, SC_None, SC_None,
-                                                 0);
+                                                 /*TInfo=*/0, SC_None, 0);
       Params.push_back(objects);
       ParmVarDecl *keys = ParmVarDecl::Create(Context, Method,
                                               SourceLocation(),
                                               SourceLocation(),
                                               &Context.Idents.get("keys"),
                                               Context.getPointerType(IdT),
-                                              /*TInfo=*/0, SC_None, SC_None,
-                                              0);
+                                              /*TInfo=*/0, SC_None, 0);
       Params.push_back(keys);
       ParmVarDecl *cnt = ParmVarDecl::Create(Context, Method,
                                              SourceLocation(),
                                              SourceLocation(),
                                              &Context.Idents.get("cnt"),
                                              Context.UnsignedLongTy,
-                                             /*TInfo=*/0, SC_None, SC_None,
-                                             0);
+                                             /*TInfo=*/0, SC_None, 0);
       Params.push_back(cnt);
       Method->setMethodParams(Context, Params, ArrayRef<SourceLocation>());
     }
@@ -1092,6 +1087,73 @@ QualType Sema::getMessageSendResultType(QualType ReceiverType,
   //     is the receiver type, otherwise
   //   - T is the type of the receiver expression.
   return ReceiverType;
+}
+
+/// Look for an ObjC method whose result type exactly matches the given type.
+static const ObjCMethodDecl *
+findExplicitInstancetypeDeclarer(const ObjCMethodDecl *MD,
+                                 QualType instancetype) {
+  if (MD->getResultType() == instancetype) return MD;
+
+  // For these purposes, a method in an @implementation overrides a
+  // declaration in the @interface.
+  if (const ObjCImplDecl *impl =
+        dyn_cast<ObjCImplDecl>(MD->getDeclContext())) {
+    const ObjCContainerDecl *iface;
+    if (const ObjCCategoryImplDecl *catImpl = 
+          dyn_cast<ObjCCategoryImplDecl>(impl)) {
+      iface = catImpl->getCategoryDecl();
+    } else {
+      iface = impl->getClassInterface();
+    }
+
+    const ObjCMethodDecl *ifaceMD = 
+      iface->getMethod(MD->getSelector(), MD->isInstanceMethod());
+    if (ifaceMD) return findExplicitInstancetypeDeclarer(ifaceMD, instancetype);
+  }
+
+  SmallVector<const ObjCMethodDecl *, 4> overrides;
+  MD->getOverriddenMethods(overrides);
+  for (unsigned i = 0, e = overrides.size(); i != e; ++i) {
+    if (const ObjCMethodDecl *result =
+          findExplicitInstancetypeDeclarer(overrides[i], instancetype))
+      return result;
+  }
+
+  return 0;
+}
+
+void Sema::EmitRelatedResultTypeNoteForReturn(QualType destType) {
+  // Only complain if we're in an ObjC method and the required return
+  // type doesn't match the method's declared return type.
+  ObjCMethodDecl *MD = dyn_cast<ObjCMethodDecl>(CurContext);
+  if (!MD || !MD->hasRelatedResultType() ||
+      Context.hasSameUnqualifiedType(destType, MD->getResultType()))
+    return;
+
+  // Look for a method overridden by this method which explicitly uses
+  // 'instancetype'.
+  if (const ObjCMethodDecl *overridden =
+        findExplicitInstancetypeDeclarer(MD, Context.getObjCInstanceType())) {
+    SourceLocation loc;
+    SourceRange range;
+    if (TypeSourceInfo *TSI = overridden->getResultTypeSourceInfo()) {
+      range = TSI->getTypeLoc().getSourceRange();
+      loc = range.getBegin();
+    }
+    if (loc.isInvalid())
+      loc = overridden->getLocation();
+    Diag(loc, diag::note_related_result_type_explicit)
+      << /*current method*/ 1 << range;
+    return;
+  }
+
+  // Otherwise, if we have an interesting method family, note that.
+  // This should always trigger if the above didn't.
+  if (ObjCMethodFamily family = MD->getMethodFamily())
+    Diag(MD->getLocation(), diag::note_related_result_type_family)
+      << /*current method*/ 1
+      << family;
 }
 
 void Sema::EmitRelatedResultTypeNote(const Expr *E) {
@@ -1724,9 +1786,11 @@ Sema::ObjCMessageKind Sema::getObjCMessageKind(Scope *S,
     QualType T;
     if (ObjCInterfaceDecl *Class = dyn_cast<ObjCInterfaceDecl>(ND))
       T = Context.getObjCInterfaceType(Class);
-    else if (TypeDecl *Type = dyn_cast<TypeDecl>(ND))
+    else if (TypeDecl *Type = dyn_cast<TypeDecl>(ND)) {
       T = Context.getTypeDeclType(Type);
-    else 
+      DiagnoseUseOfDecl(Type, NameLoc);
+    }
+    else
       return ObjCInstanceMessage;
 
     //  We have a class message, and T is the type we're

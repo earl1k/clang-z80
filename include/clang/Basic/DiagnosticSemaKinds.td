@@ -254,19 +254,20 @@ def note_using_decl_constructor_conflict_previous_ctor : Note<
   "previous constructor">;
 def note_using_decl_constructor_conflict_previous_using : Note<
   "previously inherited here">;
+def warn_using_decl_constructor_ellipsis : Warning<
+  "inheriting constructor does not inherit ellipsis">,
+  InGroup<DiagGroup<"inherited-variadic-ctor">>;
+def note_using_decl_constructor_ellipsis : Note<
+  "constructor declared with ellipsis here">;
 def err_using_decl_can_not_refer_to_class_member : Error<
   "using declaration can not refer to class member">;
 def err_using_decl_can_not_refer_to_namespace : Error<
   "using declaration can not refer to namespace">;
 def err_using_decl_constructor : Error<
   "using declaration can not refer to a constructor">;
-def err_using_decl_constructor_unsupported : Error<
-  "inheriting constructors are not supported">;
-// FIXME: Replace the above error with this warning if support for
-//        inheriting constructors is implemented.
-//def warn_cxx98_compat_using_decl_constructor : Warning<
-//  "inheriting constructors are incompatible with C++98">,
-//  InGroup<CXX98Compat>, DefaultIgnore;
+def warn_cxx98_compat_using_decl_constructor : Warning<
+  "inheriting constructors are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_using_decl_destructor : Error<
   "using declaration can not refer to a destructor">;
 def err_using_decl_template_id : Error<
@@ -410,6 +411,8 @@ def err_main_arg_wrong : Error<"%select{first|second|third|fourth}0 "
     "platform-specific data}0) must be of type %1">;
 
 /// parser diagnostics
+def ext_no_declarators : ExtWarn<"declaration does not declare anything">,
+  InGroup<MissingDeclarations>;
 def ext_typedef_without_a_name : ExtWarn<"typedef requires a name">,
   InGroup<MissingDeclarations>;
 def err_typedef_not_identifier : Error<"typedef name must be an identifier">;
@@ -522,9 +525,8 @@ def err_conflicting_ivar_name : Error<
   "conflicting instance variable names: %0 vs %1">;
 def err_inconsistant_ivar_count : Error<
   "inconsistent number of instance variables specified">;
-def warn_incomplete_impl : Warning<"incomplete implementation">,
+def warn_undef_method_impl : Warning<"method definition for %0 not found">,
   InGroup<DiagGroup<"incomplete-implementation">>;
-def note_undef_method_impl : Note<"method definition for %0 not found">;
 def note_required_for_protocol_at : 
   Note<"required for direct or indirect protocol %0">;
 
@@ -632,9 +634,11 @@ def warn_objc_property_no_assignment_attribute : Warning<
   "'assign' is assumed">,
   InGroup<ObjCPropertyNoAttribute>;
 def warn_objc_isa_use : Warning<
-  "direct access to Objective-C's isa is deprecated "
-  "in favor of object_setClass() and object_getClass()">,
-  InGroup<DiagGroup<"deprecated-objc-isa-usage">>;
+  "direct access to Objective-C's isa is deprecated in favor of "
+  "object_getClass()">, InGroup<DeprecatedObjCIsaUsage>;
+def warn_objc_isa_assign : Warning<
+  "assignment to Objective-C's isa is deprecated in favor of "
+  "object_setClass()">, InGroup<DeprecatedObjCIsaUsage>;
 def warn_objc_property_default_assign_on_object : Warning<
   "default property attribute 'assign' not appropriate for non-GC object">,
   InGroup<ObjCPropertyNoAttribute>;
@@ -669,12 +673,12 @@ def warn_auto_synthesizing_protocol_property :Warning<
 def warn_no_autosynthesis_shared_ivar_property : Warning <
   "auto property synthesis will not synthesize property "
   "'%0' because it cannot share an ivar with another synthesized property">,
-  InGroup<ObjCNoPropertyAuthoSynthesis>;
+  InGroup<ObjCNoPropertyAutoSynthesis>;
 def warn_no_autosynthesis_property : Warning<
   "auto property synthesis will not synthesize property "
   "'%0' because it is 'readwrite' but it will be synthesized 'readonly' "
   "via another property">,
-  InGroup<ObjCNoPropertyAuthoSynthesis>;
+  InGroup<ObjCNoPropertyAutoSynthesis>;
 def warn_autosynthesis_property_ivar_match :Warning<
   "autosynthesized property %0 will use %select{|synthesized}1 instance variable "
   "%2, not existing instance variable %3">,
@@ -863,6 +867,8 @@ def err_friend_def_in_local_class : Error<
   "friend function cannot be defined in a local class">;
 def err_friend_not_first_in_declaration : Error<
   "'friend' must appear first in a non-function declaration">;
+def err_using_decl_friend : Error<
+  "cannot befriend target of using declaration">;
   
 def err_invalid_member_in_interface : Error<
   "%select{data member |non-public member function |static member function |"
@@ -1104,9 +1110,11 @@ def note_member_synthesized_at : Note<
   "implicit default %select{constructor|copy constructor|move constructor|copy "
   "assignment operator|move assignment operator|destructor}0 for %1 first "
   "required here">;
+def note_inhctor_synthesized_at : Note<
+  "inheriting constructor for %0 first required here">;
 def err_missing_default_ctor : Error<
-  "%select{|implicit default }0constructor for %1 must explicitly initialize "
-  "the %select{base class|member}2 %3 which does not have a default "
+  "%select{|implicit default |inheriting }0constructor for %1 must explicitly "
+  "initialize the %select{base class|member}2 %3 which does not have a default "
   "constructor">;
 
 def err_illegal_union_or_anon_struct_member : Error<
@@ -1160,8 +1168,7 @@ def warn_cxx98_compat_static_data_member_in_union : Warning<
 def err_union_member_of_reference_type : Error<
   "union member %0 has reference type %1">;
 def ext_anonymous_struct_union_qualified : Extension<
-  "anonymous %select{struct|union}0 cannot be '%select{const|volatile|"
-  "restrict}1'">;
+  "anonymous %select{struct|union}0 cannot be '%1'">;
 def err_different_return_type_for_overriding_virtual_function : Error<
   "virtual function %0 has a different return type "
   "%diff{($) than the function it overrides (which has return type $)|"
@@ -2274,8 +2281,8 @@ def err_uninitialized_member_for_assign : Error<
   "non-static %select{reference|const}1 member %2 can't use default "
   "assignment operator">;
 def err_uninitialized_member_in_ctor : Error<
-  "%select{|implicit default }0constructor for %1 must explicitly initialize "
-  "the %select{reference|const}2 member %3">;
+  "%select{|implicit default |inheriting }0constructor for %1 must explicitly "
+  "initialize the %select{reference|const}2 member %3">;
 def err_default_arg_makes_ctor_special : Error<
   "addition of default argument on redeclaration makes this constructor a "
   "%select{default|copy|move}0 constructor">;
@@ -3323,6 +3330,9 @@ def warn_internal_in_extern_inline : ExtWarn<
 def ext_internal_in_extern_inline : Extension<
   "static %select{function|variable}0 %1 is used in an inline function with "
   "external linkage">, InGroup<StaticInInline>;
+def warn_static_local_in_extern_inline : Warning<
+  "non-constant static local variable in inline function may be different "
+  "in different files">, InGroup<StaticLocalInInline>;
 def note_convert_inline_to_static : Note<
   "use 'static' to give inline function %0 internal linkage">;
 def note_internal_decl_declared_here : Note<
@@ -3935,16 +3945,17 @@ def err_atomic_specifier_bad_type : Error<
   "%1 %select{||||||which is not trivially copyable}0">;
 
 // Expressions.
-def ext_sizeof_function_type : Extension<
-  "invalid application of 'sizeof' to a function type">, InGroup<PointerArith>;
-def ext_sizeof_void_type : Extension<
-  "invalid application of '%select{sizeof|__alignof|vec_step}0' to a void "
+def ext_sizeof_alignof_function_type : Extension<
+  "invalid application of '%select{sizeof|alignof|vec_step}0' to a "
+  "function type">, InGroup<PointerArith>;
+def ext_sizeof_alignof_void_type : Extension<
+  "invalid application of '%select{sizeof|alignof|vec_step}0' to a void "
   "type">, InGroup<PointerArith>;
 def err_sizeof_alignof_incomplete_type : Error<
-  "invalid application of '%select{sizeof|__alignof|vec_step}0' to an "
+  "invalid application of '%select{sizeof|alignof|vec_step}0' to an "
   "incomplete type %1">;
 def err_sizeof_alignof_bitfield : Error<
-  "invalid application of '%select{sizeof|__alignof}0' to bit-field">;
+  "invalid application of '%select{sizeof|alignof}0' to bit-field">;
 def err_vecstep_non_scalar_vector_type : Error<
   "'vec_step' requires built-in scalar or vector type, %0 invalid">;
 def err_offsetof_incomplete_type : Error<
@@ -4027,6 +4038,10 @@ def warn_sizeof_array_param : Warning<
   "sizeof on array function parameter will return size of %0 instead of %1">,
   InGroup<SizeofArrayArgument>;
 
+def warn_sizeof_array_decay : Warning<
+  "sizeof on pointer operation will return size of %0 instead of %1">,
+  InGroup<SizeofArrayDecay>;
+
 def err_sizeof_nonfragile_interface : Error<
   "application of '%select{alignof|sizeof}1' to interface %0 is "
   "not supported on this architecture and platform">;
@@ -4051,6 +4066,8 @@ def err_subscript_function_type : Error<
   "subscript of pointer to function type %0">;
 def err_subscript_incomplete_type : Error<
   "subscript of pointer to incomplete type %0">;
+def err_dereference_incomplete_type : Error<
+  "dereference of pointer to incomplete type %0">;
 def ext_gnu_subscript_void_type : Extension<
   "subscript of a pointer to void is a GNU extension">, InGroup<PointerArith>;
 def err_typecheck_member_reference_struct_union : Error<
@@ -4177,7 +4194,13 @@ def err_typecheck_sclass_fscope : Error<
   "illegal storage class on file-scoped variable">;
 def err_unsupported_global_register : Error<
   "global register variables are not supported">;
-def warn_standalone_specifier : Warning<"'%0' ignored on this declaration">;
+def warn_standalone_specifier : Warning<"'%0' ignored on this declaration">,
+  InGroup<MissingDeclarations>;
+def ext_standalone_specifier : ExtWarn<"'%0' is not permitted on a declaration "
+  "of a type">, InGroup<MissingDeclarations>;
+def err_standalone_class_nested_name_specifier : Error<
+  "forward declaration of %select{class|struct|interface|union|enum}0 cannot "
+  "have a nested name specifier">;
 def err_typecheck_sclass_func : Error<"illegal storage class on function">;
 def err_static_block_func : Error<
   "function declared in block scope cannot have 'static' storage class">;
@@ -4479,6 +4502,14 @@ def note_parameter_here : Note<
 def err_bad_reinterpret_cast_overload : Error<
   "reinterpret_cast cannot resolve overloaded function %0 to type %1">;
 
+def warn_reinterpret_different_from_static : Warning<
+  "'reinterpret_cast' %select{from|to}3 class %0 %select{to|from}3 its "
+  "%select{virtual base|base at non-zero offset}2 %1 behaves differently from "
+  "'static_cast'">, InGroup<ReinterpretBaseClass>;
+def note_reinterpret_updowncast_use_static: Note<
+  "use 'static_cast' to adjust the pointer correctly while "
+  "%select{upcasting|downcasting}0">;
+
 def err_bad_static_cast_overload : Error<
   "address of overloaded function %0 cannot be static_cast to type %1">;
 
@@ -4655,7 +4686,16 @@ def warn_overloaded_virtual : Warning<
   "%q0 hides overloaded virtual %select{function|functions}1">,
   InGroup<OverloadedVirtual>, DefaultIgnore;
 def note_hidden_overloaded_virtual_declared_here : Note<
-  "hidden overloaded virtual function %q0 declared here">;
+  "hidden overloaded virtual function %q0 declared here"
+  "%select{|: different classes%diff{ ($ vs $)|}2,3"
+  "|: different number of parameters (%2 vs %3)"
+  "|: type mismatch at %ordinal2 parameter%diff{ ($ vs $)|}3,4"
+  "|: different return type%diff{ ($ vs $)|}2,3"
+  "|: different qualifiers ("
+  "%select{none|const|restrict|const and restrict|volatile|const and volatile|"
+  "volatile and restrict|const, volatile, and restrict}2 vs "
+  "%select{none|const|restrict|const and restrict|volatile|const and volatile|"
+  "volatile and restrict|const, volatile, and restrict}3)}1">;
 def warn_using_directive_in_header : Warning<
   "using namespace directive in global context in header">,
   InGroup<HeaderHygiene>, DefaultIgnore;
@@ -6174,6 +6214,24 @@ def err_sampler_argument_required : Error<
   "sampler_t variable required - got %0">;
 def err_wrong_sampler_addressspace: Error<
   "sampler type cannot be used with the __local and __global address space qualifiers">;
+def err_opencl_global_invalid_addr_space : Error<
+  "global variables must have a constant address space qualifier">;
+  
+// OpenMP support.
+def err_omp_expected_var_arg_suggest : Error<
+  "%0 is not a global variable, static local variable or static data member%select{|; did you mean %2?}1">;
+def err_omp_global_var_arg : Error<
+  "arguments of '#pragma omp %0' must have %select{global storage|static storage duration}1">;
+def err_omp_ref_type_arg : Error<
+  "arguments of '#pragma omp %0' cannot be of reference type %1">;
+def err_omp_var_scope : Error<
+  "'#pragma omp %0' must appear in the scope of the %1 variable declaration">;
+def err_omp_var_used : Error<
+  "'#pragma omp %0' must precede all references to variable %1">;
+def err_omp_var_thread_local : Error<
+  "variable %0 cannot be threadprivate because it is thread-local">;
+def err_omp_incomplete_type : Error<
+  "a threadprivate variable must not have incomplete type %0">;
 
 } // end of sema category
 
@@ -6186,15 +6244,19 @@ def warn_related_result_type_compatibility_class : Warning<
 def warn_related_result_type_compatibility_protocol : Warning<
   "protocol method is expected to return an instance of the implementing "
   "class, but is declared to return %0">;
-def note_related_result_type_overridden_family : Note<
-  "overridden method is part of the '%select{|alloc|copy|init|mutableCopy|"
-  "new|autorelease|dealloc|finalize|release|retain|retainCount|self}0' method "
-  "family">;
+def note_related_result_type_family : Note<
+  "%select{overridden|current}0 method is part of the '%select{|alloc|copy|init|"
+  "mutableCopy|new|autorelease|dealloc|finalize|release|retain|retainCount|"
+  "self}1' method family%select{| and is expected to return an instance of its "
+  "class type}0">;
 def note_related_result_type_overridden : Note<
   "overridden method returns an instance of its class type">;
 def note_related_result_type_inferred : Note<
   "%select{class|instance}0 method %1 is assumed to return an instance of "
   "its receiver type (%2)">;
+def note_related_result_type_explicit : Note<
+  "%select{overridden|current}0 method is explicitly declared 'instancetype'"
+  "%select{| and is expected to return an instance of its class type}0">;
 
 }
 

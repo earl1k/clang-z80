@@ -287,10 +287,10 @@ void LookupResult::configure() {
   IDNS = getIDNS(LookupKind, SemaRef.getLangOpts().CPlusPlus,
                  isForRedeclaration());
 
-  // If we're looking for one of the allocation or deallocation
-  // operators, make sure that the implicitly-declared new and delete
-  // operators can be found.
   if (!isForRedeclaration()) {
+    // If we're looking for one of the allocation or deallocation
+    // operators, make sure that the implicitly-declared new and delete
+    // operators can be found.
     switch (NameInfo.getName().getCXXOverloadedOperator()) {
     case OO_New:
     case OO_Delete:
@@ -301,6 +301,15 @@ void LookupResult::configure() {
 
     default:
       break;
+    }
+
+    // Compiler builtins are always visible, regardless of where they end
+    // up being declared.
+    if (IdentifierInfo *Id = NameInfo.getName().getAsIdentifierInfo()) {
+      if (unsigned BuiltinID = Id->getBuiltinID()) {
+        if (!SemaRef.Context.BuiltinInfo.isPredefinedLibFunction(BuiltinID))
+          AllowHidden = true;
+      }
     }
   }
 }
@@ -945,6 +954,21 @@ bool Sema::CppLookupName(LookupResult &R, Scope *S) {
           continue;
         }
 
+        // If this is a file context, we need to perform unqualified name
+        // lookup considering using directives.
+        if (Ctx->isFileContext()) {
+          UnqualUsingDirectiveSet UDirs;
+          UDirs.visit(Ctx, Ctx);
+          UDirs.done();
+
+          if (CppNamespaceLookup(*this, R, Context, Ctx, UDirs)) {
+            R.resolveKind();
+            return true;
+          }
+
+          continue;
+        }
+
         // Perform qualified name lookup into this context.
         // FIXME: In some cases, we know that every name that could be found by
         // this qualified name lookup will also be on the identifier chain. For
@@ -979,7 +1003,6 @@ bool Sema::CppLookupName(LookupResult &R, Scope *S) {
   // Unqualified name lookup in C++ requires looking into scopes
   // that aren't strictly lexical, and therefore we walk through the
   // context as well as walking through the scopes.
-
   for (; S; S = S->getParent()) {
     // Check whether the IdResolver has anything in this scope.
     bool Found = false;
@@ -4124,4 +4147,22 @@ std::string TypoCorrection::getAsString(const LangOptions &LO) const {
   }
 
   return CorrectionName.getAsString();
+}
+
+bool CorrectionCandidateCallback::ValidateCandidate(const TypoCorrection &candidate) {
+  if (!candidate.isResolved())
+    return true;
+
+  if (candidate.isKeyword())
+    return WantTypeSpecifiers || WantExpressionKeywords || WantCXXNamedCasts ||
+           WantRemainingKeywords || WantObjCSuper;
+
+  for (TypoCorrection::const_decl_iterator CDecl = candidate.begin(),
+                                           CDeclEnd = candidate.end();
+       CDecl != CDeclEnd; ++CDecl) {
+    if (!isa<TypeDecl>(*CDecl))
+      return true;
+  }
+
+  return WantTypeSpecifiers;
 }

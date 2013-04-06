@@ -204,7 +204,7 @@ private:
          isUnaryOperator(*Parent) || Parent->Type == TT_ObjCForIn ||
          Parent->Type == TT_CastRParen ||
          getBinOpPrecedence(Parent->FormatTok.Tok.getKind(), true, true) >
-         prec::Unknown);
+             prec::Unknown);
     ScopedContextCreator ContextCreator(*this, tok::l_square, 10);
     Contexts.back().IsExpression = true;
     bool StartsObjCArrayLiteral = Parent && Parent->is(tok::at);
@@ -313,12 +313,12 @@ private:
     switch (Tok->FormatTok.Tok.getKind()) {
     case tok::plus:
     case tok::minus:
-      // At the start of the line, +/- specific ObjectiveC method
-      // declarations.
-      if (Tok->Parent == NULL)
+      if (Tok->Parent == NULL && Line.MustBeDeclaration)
         Tok->Type = TT_ObjCMethodSpecifier;
       break;
     case tok::colon:
+      if (Tok->Parent == NULL)
+        return false;
       // Colons from ?: are handled in parseConditional().
       if (Tok->Parent->is(tok::r_paren) && Contexts.size() == 1) {
         Tok->Type = TT_CtorInitializerColon;
@@ -327,7 +327,7 @@ private:
         Tok->Type = TT_ObjCMethodExpr;
         Tok->Parent->Type = TT_ObjCSelectorName;
         if (Tok->Parent->FormatTok.TokenLength >
-            Contexts.back().LongestObjCSelectorName)
+                Contexts.back().LongestObjCSelectorName)
           Contexts.back().LongestObjCSelectorName =
               Tok->Parent->FormatTok.TokenLength;
         if (Contexts.back().FirstObjCSelectorName == NULL)
@@ -407,6 +407,10 @@ private:
       if (Line.First.is(tok::kw_for) &&
           Tok->FormatTok.Tok.getIdentifierInfo() == &Ident_in)
         Tok->Type = TT_ObjCForIn;
+      break;
+    case tok::comma:
+      if (Contexts.back().FirstStartOfName)
+        Contexts.back().FirstStartOfName->PartOfMultiVariableDeclStmt = true;
       break;
     default:
       break;
@@ -538,7 +542,8 @@ private:
         : ContextKind(ContextKind), BindingStrength(BindingStrength),
           LongestObjCSelectorName(0), ColonIsForRangeExpr(false),
           ColonIsObjCMethodExpr(false), FirstObjCSelectorName(NULL),
-          IsExpression(IsExpression), CanBeExpression(true) {}
+          FirstStartOfName(NULL), IsExpression(IsExpression),
+          CanBeExpression(true) {}
 
     tok::TokenKind ContextKind;
     unsigned BindingStrength;
@@ -546,6 +551,7 @@ private:
     bool ColonIsForRangeExpr;
     bool ColonIsObjCMethodExpr;
     AnnotatedToken *FirstObjCSelectorName;
+    AnnotatedToken *FirstStartOfName;
     bool IsExpression;
     bool CanBeExpression;
   };
@@ -600,8 +606,10 @@ private:
           ((Current.Parent->is(tok::identifier) &&
             Current.Parent->FormatTok.Tok.getIdentifierInfo()
                 ->getPPKeywordID() == tok::pp_not_keyword) ||
+           isSimpleTypeSpecifier(*Current.Parent) ||
            Current.Parent->Type == TT_PointerOrReference ||
            Current.Parent->Type == TT_TemplateCloser)) {
+        Contexts.back().FirstStartOfName = &Current;
         Current.Type = TT_StartOfName;
       } else if (Current.isOneOf(tok::star, tok::amp, tok::ampamp)) {
         Current.Type =
@@ -679,8 +687,7 @@ private:
 
     if (PrevToken->FormatTok.Tok.isLiteral() ||
         PrevToken->isOneOf(tok::r_paren, tok::r_square) ||
-        NextToken->FormatTok.Tok.isLiteral() || isUnaryOperator(*NextToken) ||
-        NextToken->isOneOf(tok::l_paren, tok::l_square))
+        NextToken->FormatTok.Tok.isLiteral() || isUnaryOperator(*NextToken))
       return TT_BinaryOperator;
 
     // It is very unlikely that we are going to find a pointer or reference type
@@ -719,6 +726,39 @@ private:
       return TT_TrailingUnaryOperator;
 
     return TT_UnaryOperator;
+  }
+
+  // FIXME: This is copy&pasted from Sema. Put it in a common place and remove
+  // duplication.
+  /// \brief Determine whether the token kind starts a simple-type-specifier.
+  bool isSimpleTypeSpecifier(const AnnotatedToken &Tok) const {
+    switch (Tok.FormatTok.Tok.getKind()) {
+    case tok::kw_short:
+    case tok::kw_long:
+    case tok::kw___int64:
+    case tok::kw___int128:
+    case tok::kw_signed:
+    case tok::kw_unsigned:
+    case tok::kw_void:
+    case tok::kw_char:
+    case tok::kw_int:
+    case tok::kw_half:
+    case tok::kw_float:
+    case tok::kw_double:
+    case tok::kw_wchar_t:
+    case tok::kw_bool:
+    case tok::kw___underlying_type:
+      return true;
+    case tok::annot_typename:
+    case tok::kw_char16_t:
+    case tok::kw_char32_t:
+    case tok::kw_typeof:
+    case tok::kw_decltype:
+      return Lex.getLangOpts().CPlusPlus;
+    default:
+      break;
+    }
+    return false;
   }
 
   SmallVector<Context, 8> Contexts;
@@ -887,7 +927,7 @@ unsigned TokenAnnotator::splitPenalty(const AnnotatedLine &Line,
   const AnnotatedToken &Right = Tok;
 
   if (Right.Type == TT_StartOfName) {
-    if (Line.First.is(tok::kw_for))
+    if (Line.First.is(tok::kw_for) && Right.PartOfMultiVariableDeclStmt)
       return 3;
     else if (Line.MightBeFunctionDecl && Right.BindingStrength == 1)
       // FIXME: Clean up hack of using BindingStrength to find top-level names.
@@ -899,6 +939,8 @@ unsigned TokenAnnotator::splitPenalty(const AnnotatedLine &Line,
     return 150;
   if (Left.is(tok::coloncolon))
     return 500;
+  if (Left.isOneOf(tok::kw_class, tok::kw_struct))
+    return 5000;
 
   if (Left.Type == TT_RangeBasedForLoopColon ||
       Left.Type == TT_InheritanceColon)
@@ -930,7 +972,7 @@ unsigned TokenAnnotator::splitPenalty(const AnnotatedLine &Line,
     return 20;
 
   if (opensScope(Left))
-    return 20;
+    return Left.ParameterCount > 1 ? prec::Comma : 20;
 
   if (Right.is(tok::lessless)) {
     if (Left.is(tok::string_literal)) {
@@ -987,7 +1029,9 @@ bool TokenAnnotator::spaceRequiredBetween(const AnnotatedLine &Line,
             !Style.PointerBindsToType);
   if (Left.Type == TT_PointerOrReference)
     return Right.FormatTok.Tok.isLiteral() ||
-           ((Right.Type != TT_PointerOrReference) && Style.PointerBindsToType);
+           ((Right.Type != TT_PointerOrReference) &&
+            Right.isNot(tok::l_paren) && Style.PointerBindsToType &&
+            Left.Parent && Left.Parent->isNot(tok::l_paren));
   if (Right.is(tok::star) && Left.is(tok::l_paren))
     return false;
   if (Left.is(tok::l_square))
@@ -1050,7 +1094,9 @@ bool TokenAnnotator::spaceRequiredBefore(const AnnotatedLine &Line,
   if (Tok.is(tok::l_paren) && !Tok.Children.empty() &&
       Tok.Children[0].Type == TT_PointerOrReference &&
       !Tok.Children[0].Children.empty() &&
-      Tok.Children[0].Children[0].isNot(tok::r_paren))
+      Tok.Children[0].Children[0].isNot(tok::r_paren) &&
+      Tok.Parent->isNot(tok::l_paren) &&
+      (Tok.Parent->Type != TT_PointerOrReference || Style.PointerBindsToType))
     return true;
   if (Tok.Parent->Type == TT_UnaryOperator || Tok.Parent->Type == TT_CastRParen)
     return false;
@@ -1063,7 +1109,8 @@ bool TokenAnnotator::spaceRequiredBefore(const AnnotatedLine &Line,
            Tok.Parent->Type == TT_TemplateCloser &&
            Style.Standard != FormatStyle::LS_Cpp11;
   }
-  if (Tok.is(tok::arrowstar) || Tok.Parent->is(tok::arrowstar))
+  if (Tok.isOneOf(tok::arrowstar, tok::periodstar) ||
+      Tok.Parent->isOneOf(tok::arrowstar, tok::periodstar))
     return false;
   if (Tok.Type == TT_BinaryOperator || Tok.Parent->Type == TT_BinaryOperator)
     return true;
@@ -1092,7 +1139,8 @@ bool TokenAnnotator::canBreakBefore(const AnnotatedLine &Line,
   if (Right.Type == TT_ConditionalExpr || Right.is(tok::question))
     return true;
   if (Right.Type == TT_RangeBasedForLoopColon ||
-      Right.Type == TT_InheritanceColon)
+      Right.Type == TT_InheritanceColon ||
+      Right.Type == TT_OverloadedOperatorLParen)
     return false;
   if (Left.Type == TT_RangeBasedForLoopColon ||
       Left.Type == TT_InheritanceColon)
@@ -1130,7 +1178,8 @@ bool TokenAnnotator::canBreakBefore(const AnnotatedLine &Line,
   if (Left.is(tok::identifier) && Right.is(tok::string_literal))
     return true;
   return (isBinaryOperator(Left) && Left.isNot(tok::lessless)) ||
-         Left.isOneOf(tok::comma, tok::coloncolon, tok::semi, tok::l_brace) ||
+         Left.isOneOf(tok::comma, tok::coloncolon, tok::semi, tok::l_brace,
+                      tok::kw_class, tok::kw_struct) ||
          Right.isOneOf(tok::lessless, tok::arrow, tok::period, tok::colon) ||
          (Left.is(tok::r_paren) && Left.Type != TT_CastRParen &&
           Right.isOneOf(tok::identifier, tok::kw___attribute)) ||
