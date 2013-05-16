@@ -397,6 +397,14 @@ private:  // Cached tokens state.
   /// allocation.
   MacroInfoChain *MICache;
 
+  struct DeserializedMacroInfoChain {
+    MacroInfo MI;
+    unsigned OwningModuleID; // MUST be immediately after the MacroInfo object
+                     // so it can be accessed by MacroInfo::getOwningModuleID().
+    DeserializedMacroInfoChain *Next;
+  };
+  DeserializedMacroInfoChain *DeserialMIChainHead;
+
 public:
   Preprocessor(IntrusiveRefCntPtr<PreprocessorOptions> PPOpts,
                DiagnosticsEngine &diags, LangOptions &opts,
@@ -1392,7 +1400,7 @@ private:
   bool InCachingLexMode() const {
     // If the Lexer pointers are 0 and IncludeMacroStack is empty, it means
     // that we are past EOF, not that we are in CachingLex mode.
-    return CurPPLexer == 0 && CurTokenLexer == 0 && CurPTHLexer == 0 &&
+    return !CurPPLexer && !CurTokenLexer && !CurPTHLexer &&
            !IncludeMacroStack.empty();
   }
   void EnterCachingLexMode();
@@ -1444,8 +1452,6 @@ public:
   void HandlePragmaPoison(Token &PoisonTok);
   void HandlePragmaSystemHeader(Token &SysHeaderTok);
   void HandlePragmaDependency(Token &DependencyTok);
-  void HandlePragmaComment(Token &CommentTok);
-  void HandlePragmaMessage(Token &MessageTok);
   void HandlePragmaPushMacro(Token &Tok);
   void HandlePragmaPopMacro(Token &Tok);
   void HandlePragmaIncludeAlias(Token &Tok);

@@ -24,6 +24,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace clang {
 struct ASTTemplateArgumentListInfo;
@@ -142,7 +143,7 @@ public:
   // FIXME: Deprecated, move clients to getName().
   std::string getNameAsString() const { return Name.getAsString(); }
 
-  void printName(raw_ostream &os) const { return Name.printName(os); }
+  void printName(raw_ostream &os) const { os << Name; }
 
   /// getDeclName - Get the actual, stored name of the declaration,
   /// which may be a special name.
@@ -212,16 +213,27 @@ public:
   bool isCXXInstanceMember() const;
 
   /// \brief Determine what kind of linkage this entity has.
-  Linkage getLinkage() const;
+  /// This is not the linkage as defined by the standard or the codegen notion
+  /// of linkage. It is just an implementation detail that is used to compute
+  /// those.
+  Linkage getLinkageInternal() const;
 
-  /// \brief True if this decl has external linkage.
-  bool hasExternalLinkage() const {
-    return getLinkage() == ExternalLinkage;
+  /// \brief Get the linkage from a semantic point of view. Entities in
+  /// anonymous namespaces are external (in c++98).
+  Linkage getFormalLinkage() const {
+    Linkage L = getLinkageInternal();
+    if (L == UniqueExternalLinkage)
+      return ExternalLinkage;
+    return L;
   }
 
-  /// \brief True if this decl has external linkage. Don't cache the linkage,
-  /// because we are not finished setting up the redecl chain for the decl.
-  bool hasExternalLinkageUncached() const;
+  /// \brief True if this decl has external linkage.
+  bool hasExternalFormalLinkage() const {
+    return getFormalLinkage() == ExternalLinkage;
+  }
+  bool isExternallyVisible() const {
+    return getLinkageInternal() == ExternalLinkage;
+  }
 
   /// \brief Determines the visibility of this entity.
   Visibility getVisibility() const {
@@ -641,6 +653,13 @@ public:
     ListInit  ///< Direct list-initialization (C++11)
   };
 
+  /// \brief Kinds of thread-local storage.
+  enum TLSKind {
+    TLS_None,   ///< Not a TLS variable.
+    TLS_Static, ///< TLS with a known-constant initializer.
+    TLS_Dynamic ///< TLS with a dynamic initializer.
+  };
+
 protected:
   /// \brief Placeholder type used in Init to denote an unparsed C++ default
   /// argument.
@@ -664,7 +683,7 @@ private:
     friend class ASTDeclReader;
 
     unsigned SClass : 3;
-    unsigned ThreadSpecified : 1;
+    unsigned TSCSpec : 2;
     unsigned InitStyle : 2;
 
     /// \brief Whether this variable is the exception variable in a C++ catch
@@ -687,7 +706,7 @@ private:
     /// \brief Whether this variable is (C++0x) constexpr.
     unsigned IsConstexpr : 1;
   };
-  enum { NumVarDeclBits = 14 };
+  enum { NumVarDeclBits = 12 };
 
   friend class ASTDeclReader;
   friend class StmtIteratorBase;
@@ -771,16 +790,31 @@ public:
   }
   void setStorageClass(StorageClass SC);
 
-  void setThreadSpecified(bool T) { VarDeclBits.ThreadSpecified = T; }
-  bool isThreadSpecified() const {
-    return VarDeclBits.ThreadSpecified;
+  void setTSCSpec(ThreadStorageClassSpecifier TSC) {
+    VarDeclBits.TSCSpec = TSC;
+  }
+  ThreadStorageClassSpecifier getTSCSpec() const {
+    return static_cast<ThreadStorageClassSpecifier>(VarDeclBits.TSCSpec);
+  }
+  TLSKind getTLSKind() const {
+    switch (VarDeclBits.TSCSpec) {
+    case TSCS_unspecified:
+      return TLS_None;
+    case TSCS___thread: // Fall through.
+    case TSCS__Thread_local:
+      return TLS_Static;
+    case TSCS_thread_local:
+      return TLS_Dynamic;
+    }
+    llvm_unreachable("Unknown thread storage class specifier!");
   }
 
   /// hasLocalStorage - Returns true if a variable with function scope
   ///  is a non-static local variable.
   bool hasLocalStorage() const {
     if (getStorageClass() == SC_None)
-      return !isFileVarDecl();
+      // Second check is for C++11 [dcl.stc]p4.
+      return !isFileVarDecl() && getTSCSpec() != TSCS_thread_local;
 
     // Return true for:  Auto, Register.
     // Return false for: Extern, Static, PrivateExtern, OpenCLWorkGroupLocal.
@@ -791,7 +825,10 @@ public:
   /// isStaticLocal - Returns true if a variable with function scope is a
   /// static local variable.
   bool isStaticLocal() const {
-    return getStorageClass() == SC_Static && !isFileVarDecl();
+    return (getStorageClass() == SC_Static ||
+            // C++11 [dcl.stc]p4
+            (getStorageClass() == SC_None && getTSCSpec() == TSCS_thread_local))
+      && !isFileVarDecl();
   }
 
   /// \brief Returns true if a variable has extern or __private_extern__
@@ -812,6 +849,14 @@ public:
   /// \brief Determines whether this variable is a variable with
   /// external, C linkage.
   bool isExternC() const;
+
+  /// \brief Determines whether this variable's context is, or is nested within,
+  /// a C++ extern "C" linkage spec.
+  bool isInExternCContext() const;
+
+  /// \brief Determines whether this variable's context is, or is nested within,
+  /// a C++ extern "C++" linkage spec.
+  bool isInExternCXXContext() const;
 
   /// isLocalVarDecl - Returns true for local variable declarations
   /// other than parameters.  Note that this includes static variables
@@ -1698,6 +1743,14 @@ public:
   /// external, C linkage.
   bool isExternC() const;
 
+  /// \brief Determines whether this function's context is, or is nested within,
+  /// a C++ extern "C" linkage spec.
+  bool isInExternCContext() const;
+
+  /// \brief Determines whether this function's context is, or is nested within,
+  /// a C++ extern "C++" linkage spec.
+  bool isInExternCXXContext() const;
+
   /// \brief Determines whether this is a global function.
   bool isGlobal() const;
 
@@ -2394,7 +2447,7 @@ protected:
   bool IsScopedUsingClassTag : 1;
 
   /// IsFixed - True if this is an enumeration with fixed underlying type. Only
-  /// possible in C++11 or Microsoft extensions mode.
+  /// possible in C++11, Microsoft extensions, or Objective C mode.
   bool IsFixed : 1;
 
   /// \brief Indicates whether it is possible for declarations of this kind
@@ -2780,18 +2833,18 @@ public:
     NumNegativeBits = Num;
   }
 
-  /// \brief Returns true if this is a C++0x scoped enumeration.
+  /// \brief Returns true if this is a C++11 scoped enumeration.
   bool isScoped() const {
     return IsScoped;
   }
 
-  /// \brief Returns true if this is a C++0x scoped enumeration.
+  /// \brief Returns true if this is a C++11 scoped enumeration.
   bool isScopedUsingClassTag() const {
     return IsScopedUsingClassTag;
   }
 
-  /// \brief Returns true if this is a C++0x enumeration with fixed underlying
-  /// type.
+  /// \brief Returns true if this is an Objective-C, C++11, or
+  /// Microsoft-style enumeration with a fixed underlying type.
   bool isFixed() const {
     return IsFixed;
   }
@@ -3160,6 +3213,67 @@ public:
   static BlockDecl *castFromDeclContext(const DeclContext *DC) {
     return static_cast<BlockDecl *>(const_cast<DeclContext*>(DC));
   }
+};
+
+/// \brief This represents the body of a CapturedStmt, and serves as its
+/// DeclContext.
+class CapturedDecl : public Decl, public DeclContext {
+private:
+  /// \brief The number of parameters to the outlined function.
+  unsigned NumParams;
+  /// \brief The body of the outlined function.
+  Stmt *Body;
+
+  explicit CapturedDecl(DeclContext *DC, unsigned NumParams)
+    : Decl(Captured, DC, SourceLocation()), DeclContext(Captured),
+      NumParams(NumParams), Body(0) { }
+
+  ImplicitParamDecl **getParams() const {
+    return reinterpret_cast<ImplicitParamDecl **>(
+             const_cast<CapturedDecl *>(this) + 1);
+  }
+
+public:
+  static CapturedDecl *Create(ASTContext &C, DeclContext *DC, unsigned NumParams);
+  static CapturedDecl *CreateDeserialized(ASTContext &C, unsigned ID,
+                                          unsigned NumParams);
+
+  Stmt *getBody() const { return Body; }
+  void setBody(Stmt *B) { Body = B; }
+
+  unsigned getNumParams() const { return NumParams; }
+
+  ImplicitParamDecl *getParam(unsigned i) const {
+    assert(i < NumParams);
+    return getParams()[i];
+  }
+  void setParam(unsigned i, ImplicitParamDecl *P) {
+    assert(i < NumParams);
+    getParams()[i] = P;
+  }
+
+  /// \brief Retrieve the parameter containing captured variables.
+  ImplicitParamDecl *getContextParam() const { return getParam(0); }
+  void setContextParam(ImplicitParamDecl *P) { setParam(0, P); }
+
+  typedef ImplicitParamDecl **param_iterator;
+  /// \brief Retrieve an iterator pointing to the first parameter decl.
+  param_iterator param_begin() const { return getParams(); }
+  /// \brief Retrieve an iterator one past the last parameter decl.
+  param_iterator param_end() const { return getParams() + NumParams; }
+
+  // Implement isa/cast/dyncast/etc.
+  static bool classof(const Decl *D) { return classofKind(D->getKind()); }
+  static bool classofKind(Kind K) { return K == Captured; }
+  static DeclContext *castToDeclContext(const CapturedDecl *D) {
+    return static_cast<DeclContext *>(const_cast<CapturedDecl *>(D));
+  }
+  static CapturedDecl *castFromDeclContext(const DeclContext *DC) {
+    return static_cast<CapturedDecl *>(const_cast<DeclContext *>(DC));
+  }
+
+  friend class ASTDeclReader;
+  friend class ASTDeclWriter;
 };
 
 /// \brief Describes a module import declaration, which makes the contents

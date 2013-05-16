@@ -583,7 +583,7 @@ ExprResult Parser::ParseCXXIdExpression(bool isAddressOfOperand) {
                                    Tok.is(tok::l_paren), isAddressOfOperand);
 }
 
-/// ParseLambdaExpression - Parse a C++0x lambda expression.
+/// ParseLambdaExpression - Parse a C++11 lambda expression.
 ///
 ///       lambda-expression:
 ///         lambda-introducer lambda-declarator[opt] compound-statement
@@ -605,9 +605,17 @@ ExprResult Parser::ParseCXXIdExpression(bool isAddressOfOperand) {
 ///         capture-list ',' capture
 ///
 ///       capture:
+///         simple-capture
+///         init-capture     [C++1y]
+///
+///       simple-capture:
 ///         identifier
 ///         '&' identifier
 ///         'this'
+///
+///       init-capture:      [C++1y]
+///         identifier initializer
+///         '&' identifier initializer
 ///
 ///       lambda-declarator:
 ///         '(' parameter-declaration-clause ')' attribute-specifier[opt]
@@ -737,6 +745,7 @@ Optional<unsigned> Parser::ParseLambdaIntroducer(LambdaIntroducer &Intro) {
     SourceLocation Loc;
     IdentifierInfo* Id = 0;
     SourceLocation EllipsisLoc;
+    ExprResult Init;
     
     if (Tok.is(tok::kw_this)) {
       Kind = LCK_This;
@@ -768,9 +777,31 @@ Optional<unsigned> Parser::ParseLambdaIntroducer(LambdaIntroducer &Intro) {
       } else {
         return DiagResult(diag::err_expected_capture);
       }
+
+      if (Tok.is(tok::l_paren)) {
+        BalancedDelimiterTracker Parens(*this, tok::l_paren);
+        Parens.consumeOpen();
+
+        ExprVector Exprs;
+        CommaLocsTy Commas;
+        if (ParseExpressionList(Exprs, Commas)) {
+          Parens.skipToEnd();
+          Init = ExprError();
+        } else {
+          Parens.consumeClose();
+          Init = Actions.ActOnParenListExpr(Parens.getOpenLocation(),
+                                            Parens.getCloseLocation(),
+                                            Exprs);
+        }
+      } else if (Tok.is(tok::l_brace) || Tok.is(tok::equal)) {
+        if (Tok.is(tok::equal))
+          ConsumeToken();
+
+        Init = ParseInitializer();
+      }
     }
 
-    Intro.addCapture(Kind, Loc, Id, EllipsisLoc);
+    Intro.addCapture(Kind, Loc, Id, EllipsisLoc, Init);
   }
 
   T.consumeClose();
@@ -805,6 +836,9 @@ ExprResult Parser::ParseLambdaExpressionAfterIntroducer(
 
   PrettyStackTraceLoc CrashInfo(PP.getSourceManager(), LambdaBeginLoc,
                                 "lambda expression parsing");
+
+  // FIXME: Call into Actions to add any init-capture declarations to the
+  // scope while parsing the lambda-declarator and compound-statement.
 
   // Parse lambda-declarator[opt].
   DeclSpec DS(AttrFactory);
@@ -1455,7 +1489,9 @@ bool Parser::ParseCXXCondition(ExprResult &ExprOut,
 
   if (!InitExpr.isInvalid())
     Actions.AddInitializerToDecl(DeclOut, InitExpr.take(), !CopyInitialization,
-                                 DS.getTypeSpecType() == DeclSpec::TST_auto);
+                                 DS.containsPlaceholderType());
+  else
+    Actions.ActOnInitializerError(DeclOut);
 
   // FIXME: Build a reference to this declaration? Convert it to bool?
   // (This is currently handled by Sema).
@@ -2033,7 +2069,7 @@ bool Parser::ParseUnqualifiedIdOperator(CXXScopeSpec &SS, bool EnteringContext,
   
   // Parse the conversion-declarator, which is merely a sequence of
   // ptr-operators.
-  Declarator D(DS, Declarator::TypeNameContext);
+  Declarator D(DS, Declarator::ConversionIdContext);
   ParseDeclaratorInternal(D, /*DirectDeclParser=*/0);
   
   // Finish up the type.

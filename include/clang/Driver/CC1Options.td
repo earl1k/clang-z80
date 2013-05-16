@@ -245,9 +245,6 @@ def fmessage_length : Separate<["-"], "fmessage-length">, MetaVarName<"<N>">,
 def Wno_rewrite_macros : Flag<["-"], "Wno-rewrite-macros">,
   HelpText<"Silence ObjC rewriting warnings">;
 
-def fwarn_on_spellcheck : Flag<["-"], "fwarn-on-spellcheck">,
-  HelpText<"Emit warning if spell-check is initiated, for testing">;
-
 //===----------------------------------------------------------------------===//
 // Frontend Options
 //===----------------------------------------------------------------------===//
@@ -437,6 +434,8 @@ def ftemplate_depth : Separate<["-"], "ftemplate-depth">,
   HelpText<"Maximum depth of recursive template instantiation">;
 def fconstexpr_depth : Separate<["-"], "fconstexpr-depth">,
   HelpText<"Maximum depth of recursive constexpr function calls">;
+def fconstexpr_steps : Separate<["-"], "fconstexpr-steps">,
+  HelpText<"Maximum number of steps in constexpr function evaluation">;
 def fbracket_depth : Separate<["-"], "fbracket-depth">,
   HelpText<"Maximum nesting level for parentheses, brackets, and braces">;
 def fconst_strings : Flag<["-"], "fconst-strings">,

@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -analyze -analyzer-checker=core,osx.cocoa.NilArg -verify -Wno-objc-root-class %s
+// RUN: %clang_cc1 -analyze -analyzer-checker=core,osx.cocoa.NonNilReturnValue,osx.cocoa.NilArg -verify -Wno-objc-root-class %s
 typedef unsigned long NSUInteger;
 typedef signed char BOOL;
 typedef struct _NSZone NSZone;
@@ -36,6 +36,10 @@ typedef struct _NSZone NSZone;
 - (void)setObject:(id)obj atIndexedSubscript:(NSUInteger)idx __attribute__((availability(macosx,introduced=10.8)));
 @end
 
+@interface NSArray (NSArrayCreation)
++ (instancetype)arrayWithObjects:(const id [])objects count:(NSUInteger)cnt;
+@end
+
 @interface NSMutableArray : NSArray
 
 - (void)addObject:(id)anObject;
@@ -58,6 +62,8 @@ typedef struct _NSZone NSZone;
 
 + (id)dictionary;
 + (id)dictionaryWithObject:(id)object forKey:(id <NSCopying>)key;
++ (instancetype)dictionaryWithObjects:(const id [])objects forKeys:(const id <NSCopying> [])keys count:(NSUInteger)cnt;
+
 @end
 
 @interface NSMutableDictionary : NSDictionary
@@ -79,6 +85,10 @@ typedef struct _NSZone NSZone;
 
 @interface NSString : NSObject <NSCopying, NSMutableCopying, NSSecureCoding>
 
+@end
+
+@interface NSNull : NSObject <NSCopying, NSSecureCoding>
++ (NSNull *)null;
 @end
 
 // NSMutableArray API
@@ -127,13 +137,13 @@ void testNilArgNSMutableDictionary3(NSMutableDictionary *d) {
 }
 
 void testNilArgNSMutableDictionary5(NSMutableDictionary *d, NSString* key) {
-  d[key] = 0; // expected-warning {{Value stored in 'NSMutableDictionary' cannot be nil}}
+  d[key] = 0; // expected-warning {{Value stored into 'NSMutableDictionary' cannot be nil}}
 }
 void testNilArgNSMutableDictionary6(NSMutableDictionary *d, NSString *key) {
   if (key)
     ;
   d[key] = 0; // expected-warning {{'NSMutableDictionary' key cannot be nil}}
-  // expected-warning@-1 {{Value stored in 'NSMutableDictionary' cannot be nil}}
+  // expected-warning@-1 {{Value stored into 'NSMutableDictionary' cannot be nil}}
 }
 
 NSDictionary *testNilArgNSDictionary1(NSString* key) {
@@ -141,6 +151,33 @@ NSDictionary *testNilArgNSDictionary1(NSString* key) {
 }
 NSDictionary *testNilArgNSDictionary2(NSObject *obj) {
   return [NSDictionary dictionaryWithObject:obj forKey:0]; // expected-warning {{Key argument to 'dictionaryWithObject:forKey:' cannot be nil}}
+}
+
+id testCreateDictionaryLiteralKey(id value, id nilKey) {
+  if (nilKey)
+    ;
+  return @{@"abc":value, nilKey:@"abc"}; // expected-warning {{Dictionary key cannot be nil}}
+}
+
+id testCreateDictionaryLiteralValue(id nilValue) {
+  if (nilValue)
+    ;
+  return @{@"abc":nilValue}; // expected-warning {{Dictionary value cannot be nil}}
+}
+
+id testCreateDictionaryLiteral(id nilValue, id nilKey) {
+  if (nilValue)
+    ;
+  if (nilKey)
+    ;
+  return @{@"abc":nilValue, nilKey:@"abc"}; // expected-warning {{Dictionary key cannot be nil}}
+                                            // expected-warning@-1 {{Dictionary value cannot be nil}}
+}
+
+id testCreateArrayLiteral(id myNil) {
+  if (myNil)
+    ;
+  return @[ @"a", myNil, @"c" ]; // expected-warning {{Array element cannot be nil}}
 }
 
 // Test inline defensive checks suppression.
@@ -195,6 +232,15 @@ void testNilReceiverRetNil2(NSMutableDictionary *D, Foo *FooPtrIn, id value) {
   // key is nil because FooPtr is nil. However, FooPtr is set to nil inside an
   // inlined function, so this error report should be suppressed.
   [D setObject: value forKey: key]; // no-warning
+}
+
+void testAssumeNSNullNullReturnsNonNil(NSMutableDictionary *Table, id Object,
+                                      id InValue) {
+  id Value = Object ? [Table objectForKey:Object] : [NSNull null];
+  if (!Value) {
+    Value = InValue;
+    [Table setObject:Value forKey:Object]; // no warning
+  }
 }
 
 

@@ -63,6 +63,7 @@ class Sema;
 class SourceManager;
 class SwitchCase;
 class TargetInfo;
+class Token;
 class VersionTuple;
 class ASTUnresolvedSet;
 
@@ -498,6 +499,9 @@ public:
                 Module *WritingModule, StringRef isysroot,
                 bool hasErrors = false);
 
+  /// \brief Emit a token.
+  void AddToken(const Token &Tok, RecordDataImpl &Record);
+
   /// \brief Emit a source location.
   void AddSourceLocation(SourceLocation Loc, RecordDataImpl &Record);
 
@@ -721,6 +725,7 @@ public:
                                     const ClassTemplateSpecializationDecl *D);
   virtual void AddedCXXTemplateSpecialization(const FunctionTemplateDecl *TD,
                                               const FunctionDecl *D);
+  virtual void DeducedReturnType(const FunctionDecl *FD, QualType ReturnType);
   virtual void CompletedImplicitDefinition(const FunctionDecl *D);
   virtual void StaticDataMemberInstantiated(const VarDecl *D);
   virtual void AddedObjCCategoryToInterface(const ObjCCategoryDecl *CatD,

@@ -220,8 +220,12 @@ void CGCXXABI::EmitGuardedInit(CodeGenFunction &CGF,
 }
 
 void CGCXXABI::registerGlobalDtor(CodeGenFunction &CGF,
+                                  const VarDecl &D,
                                   llvm::Constant *dtor,
                                   llvm::Constant *addr) {
+  if (D.getTLSKind())
+    CGM.ErrorUnsupported(&D, "non-trivial TLS destruction");
+
   // The default behavior is to use atexit.
   CGF.registerGlobalDtorWithAtExit(dtor, addr);
 }
@@ -247,6 +251,28 @@ llvm::Constant *CGCXXABI::getMemberPointerAdjustment(const CastExpr *E) {
                                           E->path_end());
 }
 
+CharUnits CGCXXABI::getMemberPointerPathAdjustment(const APValue &MP) {
+  // TODO: Store base specifiers in APValue member pointer paths so we can
+  // easily reuse CGM.GetNonVirtualBaseClassOffset().
+  const ValueDecl *MPD = MP.getMemberPointerDecl();
+  CharUnits ThisAdjustment = CharUnits::Zero();
+  ArrayRef<const CXXRecordDecl*> Path = MP.getMemberPointerPath();
+  bool DerivedMember = MP.isMemberPointerToDerivedMember();
+  const CXXRecordDecl *RD = cast<CXXRecordDecl>(MPD->getDeclContext());
+  for (unsigned I = 0, N = Path.size(); I != N; ++I) {
+    const CXXRecordDecl *Base = RD;
+    const CXXRecordDecl *Derived = Path[I];
+    if (DerivedMember)
+      std::swap(Base, Derived);
+    ThisAdjustment +=
+      getContext().getASTRecordLayout(Derived).getBaseClassOffset(Base);
+    RD = Path[I];
+  }
+  if (DerivedMember)
+    ThisAdjustment = -ThisAdjustment;
+  return ThisAdjustment;
+}
+
 llvm::BasicBlock *CGCXXABI::EmitCtorCompleteObjectHandler(
                                                          CodeGenFunction &CGF) {
   if (CGM.getTarget().getCXXABI().hasConstructorVariants())
@@ -254,4 +280,15 @@ llvm::BasicBlock *CGCXXABI::EmitCtorCompleteObjectHandler(
 
   ErrorUnsupportedABI(CGF, "complete object detection in ctor");
   return 0;
+}
+
+void CGCXXABI::EmitThreadLocalInitFuncs(
+    llvm::ArrayRef<std::pair<const VarDecl *, llvm::GlobalVariable *> > Decls,
+    llvm::Function *InitFunc) {
+}
+
+LValue CGCXXABI::EmitThreadLocalDeclRefExpr(CodeGenFunction &CGF,
+                                          const DeclRefExpr *DRE) {
+  ErrorUnsupportedABI(CGF, "odr-use of thread_local global");
+  return LValue();
 }

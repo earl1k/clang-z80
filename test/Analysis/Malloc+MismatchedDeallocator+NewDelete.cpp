@@ -1,9 +1,7 @@
 // RUN: %clang_cc1 -analyze -analyzer-checker=core,unix.Malloc,unix.MismatchedDeallocator,cplusplus.NewDelete -std=c++11 -verify %s
 // RUN: %clang_cc1 -analyze -analyzer-checker=core,unix.Malloc,unix.MismatchedDeallocator,cplusplus.NewDelete,alpha.cplusplus.NewDeleteLeaks -DLEAKS -std=c++11 -verify %s
 
-typedef __typeof(sizeof(int)) size_t;
-void *malloc(size_t);
-void free(void *);
+#include "Inputs/system-header-simulator-for-malloc.h"
 
 //--------------------------------------------------
 // Check that unix.Malloc catches all types of bugs.
@@ -72,4 +70,36 @@ void testNewBadFree() {
 void testNewOffsetFree() {
   int *p = new int;
   operator delete(++p); // expected-warning{{Argument to operator delete is offset by 4 bytes from the start of memory allocated by 'new'}}
+}
+
+//----------------------------------------------------------------
+// Test that we check for free errors on escaped pointers.
+//----------------------------------------------------------------
+void changePtr(int **p);
+static int *globalPtr;
+void changePointee(int *p);
+
+void testMismatchedChangePtrThroughCall() {
+  int *p = (int*)malloc(sizeof(int)*4);
+  changePtr(&p);
+  delete p; // no-warning the value of the pointer might have changed
+}
+
+void testMismatchedChangePointeeThroughCall() {
+  int *p = (int*)malloc(sizeof(int)*4);
+  changePointee(p);
+  delete p; // expected-warning{{Memory allocated by malloc() should be deallocated by free(), not 'delete'}}
+}
+
+void testShouldReportDoubleFreeNotMismatched() {
+  int *p = (int*)malloc(sizeof(int)*4);
+  globalPtr = p;
+  free(p);
+  delete globalPtr; // expected-warning {{Attempt to free released memory}}
+}
+
+void testMismatchedChangePointeeThroughAssignment() {
+  int *arr = new int[4];
+  globalPtr = arr;
+  delete arr; // expected-warning{{Memory allocated by 'new[]' should be deallocated by 'delete[]', not 'delete'}}
 }

@@ -646,6 +646,13 @@ class SourceManager : public RefCountedBase<SourceManager> {
   // Statistics for -print-stats.
   mutable unsigned NumLinearScans, NumBinaryProbes;
 
+  /// \brief Associates a FileID with its "included/expanded in" decomposed
+  /// location.
+  ///
+  /// Used to cache results from and speed-up \c getDecomposedIncludedLoc
+  /// function.
+  mutable llvm::DenseMap<FileID, std::pair<FileID, unsigned> > IncludedLocMap;
+
   /// The key value into the IsBeforeInTUCache table.
   typedef std::pair<FileID, FileID> IsBeforeInTUCacheKey;
 
@@ -998,7 +1005,7 @@ public:
       return SourceLocation();
     
     unsigned FileOffset = Entry.getOffset();
-    return SourceLocation::getFileLoc(FileOffset + getFileIDSize(FID) - 1);
+    return SourceLocation::getFileLoc(FileOffset + getFileIDSize(FID));
   }
 
   /// \brief Returns the include location if \p FID is a \#include'd file
@@ -1126,6 +1133,10 @@ public:
       return std::make_pair(FID, Offset);
     return getDecomposedSpellingLocSlowCase(E, Offset);
   }
+
+  /// \brief Returns the "included/expanded in" decomposed location of the given
+  /// FileID.
+  std::pair<FileID, unsigned> getDecomposedIncludedLoc(FileID FID) const;
 
   /// \brief Returns the offset from the start of the file that the
   /// specified SourceLocation represents.

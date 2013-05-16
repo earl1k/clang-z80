@@ -557,6 +557,7 @@ Lexer::ComputePreamble(const llvm::MemoryBuffer *Buffer,
   SourceLocation FileLoc = SourceLocation::getFromRawEncoding(StartOffset);
   Lexer TheLexer(FileLoc, LangOpts, Buffer->getBufferStart(),
                  Buffer->getBufferStart(), Buffer->getBufferEnd());
+  TheLexer.SetCommentRetentionState(true);
 
   // StartLoc will differ from FileLoc if there is a BOM that was skipped.
   SourceLocation StartLoc = TheLexer.getSourceLocation();
@@ -565,6 +566,7 @@ Lexer::ComputePreamble(const llvm::MemoryBuffer *Buffer,
   Token TheTok;
   Token IfStartTok;
   unsigned IfCount = 0;
+  SourceLocation ActiveCommentLoc;
 
   unsigned MaxLineOffset = 0;
   if (MaxLines) {
@@ -612,13 +614,17 @@ Lexer::ComputePreamble(const llvm::MemoryBuffer *Buffer,
     }
 
     // Comments are okay; skip over them.
-    if (TheTok.getKind() == tok::comment)
+    if (TheTok.getKind() == tok::comment) {
+      if (ActiveCommentLoc.isInvalid())
+        ActiveCommentLoc = TheTok.getLocation();
       continue;
+    }
     
     if (TheTok.isAtStartOfLine() && TheTok.getKind() == tok::hash) {
       // This is the start of a preprocessor directive. 
       Token HashTok = TheTok;
       InPreprocessorDirective = true;
+      ActiveCommentLoc = SourceLocation();
       
       // Figure out which directive this is. Since we're lexing raw tokens,
       // we don't have an identifier table available. Instead, just look at
@@ -689,7 +695,14 @@ Lexer::ComputePreamble(const llvm::MemoryBuffer *Buffer,
     break;
   } while (true);
   
-  SourceLocation End = IfCount? IfStartTok.getLocation() : TheTok.getLocation();
+  SourceLocation End;
+  if (IfCount)
+    End = IfStartTok.getLocation();
+  else if (ActiveCommentLoc.isValid())
+    End = ActiveCommentLoc; // don't truncate a decl comment.
+  else
+    End = TheTok.getLocation();
+
   return std::make_pair(End.getRawEncoding() - StartLoc.getRawEncoding(),
                         IfCount? IfStartTok.isAtStartOfLine()
                                : TheTok.isAtStartOfLine());
@@ -1857,7 +1870,9 @@ bool Lexer::SkipWhitespace(Token &Result, const char *CurPtr) {
   // Whitespace - Skip it, then return the token after the whitespace.
   bool SawNewline = isVerticalWhitespace(CurPtr[-1]);
 
-  unsigned char Char = *CurPtr;  // Skip consequtive spaces efficiently.
+  unsigned char Char = *CurPtr;
+
+  // Skip consecutive spaces efficiently.
   while (1) {
     // Skip horizontal whitespace very aggressively.
     while (isHorizontalWhitespace(Char))
@@ -1873,7 +1888,7 @@ bool Lexer::SkipWhitespace(Token &Result, const char *CurPtr) {
       return false;
     }
 
-    // ok, but handle newline.
+    // OK, but handle newline.
     SawNewline = true;
     Char = *++CurPtr;
   }

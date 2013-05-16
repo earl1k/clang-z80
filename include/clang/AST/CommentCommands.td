@@ -67,14 +67,12 @@ class DeclarationVerbatimLineCommand<string name> :
 }
 
 class FunctionDeclarationVerbatimLineCommand<string name> :
-      VerbatimLineCommand<name> {
-  let IsDeclarationCommand = 1;
+      DeclarationVerbatimLineCommand<name> {
   let IsFunctionDeclarationCommand = 1;
 }
 
 class RecordLikeDeclarationVerbatimLineCommand<string name> :
-      VerbatimLineCommand<name> {
-  let IsDeclarationCommand = 1;
+      DeclarationVerbatimLineCommand<name> {
   let IsRecordLikeDeclarationCommand = 1;
 }
 
@@ -121,6 +119,7 @@ def Headerfile : BlockCommand<"headerfile"> { let IsHeaderfileCommand = 1; }
 // We don't do any additional semantic analysis for the following
 // BlockCommands.  It might be a good idea to do something extra for them, but
 // for now we model them as plain BlockCommands.
+def Arg        : BlockCommand<"arg">;
 def Attention  : BlockCommand<"attention">;
 def Author     : BlockCommand<"author">;
 def Authors    : BlockCommand<"authors">;
@@ -128,7 +127,9 @@ def Bug        : BlockCommand<"bug">;
 def Copyright  : BlockCommand<"copyright">;
 def Date       : BlockCommand<"date">;
 def Invariant  : BlockCommand<"invariant">;
+def Li         : BlockCommand<"li">;
 def Note       : BlockCommand<"note">;
+def Par        : BlockCommand<"par">;
 def Post       : BlockCommand<"post">;
 def Pre        : BlockCommand<"pre">;
 def Remark     : BlockCommand<"remark">;
@@ -152,6 +153,7 @@ def InstanceSize  : RecordLikeDetailCommand<"instancesize">;
 def Ownership     : RecordLikeDetailCommand<"ownership">;
 def Performance   : RecordLikeDetailCommand<"performance">;
 def Security      : RecordLikeDetailCommand<"security">;
+def SeeAlso       : BlockCommand<"seealso">;
 def SuperClass    : RecordLikeDetailCommand<"superclass">;
 
 //===----------------------------------------------------------------------===//
@@ -177,6 +179,7 @@ defm FBrace   : VerbatimBlockCommand<"f{", "f}">; // LaTeX environment
 
 // HeaderDoc commands
 defm Textblock    : VerbatimBlockCommand<"textblock", "/textblock">;
+defm Link         : VerbatimBlockCommand<"link", "/link">;
 
 //===----------------------------------------------------------------------===//
 // VerbatimLineCommand

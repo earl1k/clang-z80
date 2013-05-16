@@ -3793,14 +3793,14 @@ CheckTemplateArgumentAddressOfObjectOrFunction(Sema &S,
   }
 
   // Address / reference template args must have external linkage in C++98.
-  if (Entity->getLinkage() == InternalLinkage) {
+  if (Entity->getFormalLinkage() == InternalLinkage) {
     S.Diag(Arg->getLocStart(), S.getLangOpts().CPlusPlus11 ?
              diag::warn_cxx98_compat_template_arg_object_internal :
              diag::ext_template_arg_object_internal)
       << !Func << Entity << Arg->getSourceRange();
     S.Diag(Entity->getLocation(), diag::note_template_arg_internal_object)
       << !Func;
-  } else if (Entity->getLinkage() == NoLinkage) {
+  } else if (!Entity->hasLinkage()) {
     S.Diag(Arg->getLocStart(), diag::err_template_arg_object_no_linkage)
       << !Func << Entity << Arg->getSourceRange();
     S.Diag(Entity->getLocation(), diag::note_template_arg_internal_object)
@@ -3842,8 +3842,7 @@ CheckTemplateArgumentAddressOfObjectOrFunction(Sema &S,
     }
 
     // A template argument must have static storage duration.
-    // FIXME: Ensure this works for thread_local as well as __thread.
-    if (Var->isThreadSpecified()) {
+    if (Var->getTLSKind()) {
       S.Diag(Arg->getLocStart(), diag::err_template_arg_thread_local)
         << Arg->getSourceRange();
       S.Diag(Var->getLocation(), diag::note_template_arg_refers_here);
@@ -6461,6 +6460,7 @@ Sema::ActOnExplicitInstantiation(Scope *S,
   // Set source locations for keywords.
   Specialization->setExternLoc(ExternLoc);
   Specialization->setTemplateKeywordLoc(TemplateLoc);
+  Specialization->setRBraceLoc(SourceLocation());
 
   if (Attr)
     ProcessDeclAttributeList(S, Specialization, Attr);

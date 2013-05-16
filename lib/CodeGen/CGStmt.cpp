@@ -22,6 +22,7 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/Support/CallSite.h"
 using namespace clang;
 using namespace CodeGen;
 
@@ -37,6 +38,8 @@ void CodeGenFunction::EmitStopPoint(const Stmt *S) {
     else
       Loc = S->getLocStart();
     DI->EmitLocation(Builder, Loc);
+
+    LastStopPoint = Loc;
   }
 }
 
@@ -134,7 +137,9 @@ void CodeGenFunction::EmitStmt(const Stmt *S) {
   case Stmt::SwitchStmtClass:   EmitSwitchStmt(cast<SwitchStmt>(*S));     break;
   case Stmt::GCCAsmStmtClass:   // Intentional fall-through.
   case Stmt::MSAsmStmtClass:    EmitAsmStmt(cast<AsmStmt>(*S));           break;
-
+  case Stmt::CapturedStmtClass:
+    EmitCapturedStmt(cast<CapturedStmt>(*S), CR_Default);
+    break;
   case Stmt::ObjCAtTryStmtClass:
     EmitObjCAtTryStmt(cast<ObjCAtTryStmt>(*S));
     break;
@@ -837,6 +842,10 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
     }
   }
 
+  ++NumReturnExprs;
+  if (RV == 0 || RV->isEvaluatable(getContext()))
+    ++NumSimpleReturnExprs;
+
   cleanupScope.ForceCleanup();
   EmitBranchThroughCleanup(ReturnBlock);
 }
@@ -1449,7 +1458,7 @@ static llvm::MDNode *getAsmSrcLocInfo(const StringLiteral *Str,
     for (unsigned i = 0, e = StrVal.size()-1; i != e; ++i) {
       if (StrVal[i] != '\n') continue;
       SourceLocation LineLoc = Str->getLocationOfByte(i+1, SM, LangOpts,
-                                                      CGF.Target);
+                                                      CGF.getTarget());
       Locs.push_back(llvm::ConstantInt::get(CGF.Int32Ty,
                                             LineLoc.getRawEncoding()));
     }
@@ -1467,18 +1476,23 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
   SmallVector<TargetInfo::ConstraintInfo, 4> InputConstraintInfos;
 
   for (unsigned i = 0, e = S.getNumOutputs(); i != e; i++) {
-    TargetInfo::ConstraintInfo Info(S.getOutputConstraint(i),
-                                    S.getOutputName(i));
-    bool IsValid = Target.validateOutputConstraint(Info); (void)IsValid;
+    StringRef Name;
+    if (const GCCAsmStmt *GAS = dyn_cast<GCCAsmStmt>(&S))
+      Name = GAS->getOutputName(i);
+    TargetInfo::ConstraintInfo Info(S.getOutputConstraint(i), Name);
+    bool IsValid = getTarget().validateOutputConstraint(Info); (void)IsValid;
     assert(IsValid && "Failed to parse output constraint"); 
     OutputConstraintInfos.push_back(Info);
   }
 
   for (unsigned i = 0, e = S.getNumInputs(); i != e; i++) {
-    TargetInfo::ConstraintInfo Info(S.getInputConstraint(i),
-                                    S.getInputName(i));
-    bool IsValid = Target.validateInputConstraint(OutputConstraintInfos.data(),
-                                                  S.getNumOutputs(), Info);
+    StringRef Name;
+    if (const GCCAsmStmt *GAS = dyn_cast<GCCAsmStmt>(&S))
+      Name = GAS->getInputName(i);
+    TargetInfo::ConstraintInfo Info(S.getInputConstraint(i), Name);
+    bool IsValid =
+      getTarget().validateInputConstraint(OutputConstraintInfos.data(),
+                                          S.getNumOutputs(), Info);
     assert(IsValid && "Failed to parse input constraint"); (void)IsValid;
     InputConstraintInfos.push_back(Info);
   }
@@ -1502,13 +1516,14 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
 
     // Simplify the output constraint.
     std::string OutputConstraint(S.getOutputConstraint(i));
-    OutputConstraint = SimplifyConstraint(OutputConstraint.c_str() + 1, Target);
+    OutputConstraint = SimplifyConstraint(OutputConstraint.c_str() + 1,
+                                          getTarget());
 
     const Expr *OutExpr = S.getOutputExpr(i);
     OutExpr = OutExpr->IgnoreParenNoopCasts(getContext());
 
     OutputConstraint = AddVariableConstraints(OutputConstraint, *OutExpr,
-                                              Target, CGM, S);
+                                              getTarget(), CGM, S);
 
     LValue Dest = EmitLValue(OutExpr);
     if (!Constraints.empty())
@@ -1589,13 +1604,13 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
 
     // Simplify the input constraint.
     std::string InputConstraint(S.getInputConstraint(i));
-    InputConstraint = SimplifyConstraint(InputConstraint.c_str(), Target,
+    InputConstraint = SimplifyConstraint(InputConstraint.c_str(), getTarget(),
                                          &OutputConstraintInfos);
 
     InputConstraint =
       AddVariableConstraints(InputConstraint,
                             *InputExpr->IgnoreParenNoopCasts(getContext()),
-                            Target, CGM, S);
+                            getTarget(), CGM, S);
 
     llvm::Value *Arg = EmitAsmInput(Info, InputExpr, Constraints);
 
@@ -1647,7 +1662,7 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
     StringRef Clobber = S.getClobber(i);
 
     if (Clobber != "memory" && Clobber != "cc")
-    Clobber = Target.getNormalizedGCCRegisterName(Clobber);
+    Clobber = getTarget().getNormalizedGCCRegisterName(Clobber);
 
     if (i != 0 || NumConstraints != 0)
       Constraints += ',';
@@ -1658,7 +1673,7 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
   }
 
   // Add machine specific clobbers
-  std::string MachineClobbers = Target.getClobbers();
+  std::string MachineClobbers = getTarget().getClobbers();
   if (!MachineClobbers.empty()) {
     if (!Constraints.empty())
       Constraints += ',';
@@ -1734,4 +1749,96 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
 
     EmitStoreThroughLValue(RValue::get(Tmp), ResultRegDests[i]);
   }
+}
+
+static LValue InitCapturedStruct(CodeGenFunction &CGF, const CapturedStmt &S) {
+  const RecordDecl *RD = S.getCapturedRecordDecl();
+  QualType RecordTy = CGF.getContext().getRecordType(RD);
+
+  // Initialize the captured struct.
+  LValue SlotLV = CGF.MakeNaturalAlignAddrLValue(
+                    CGF.CreateMemTemp(RecordTy, "agg.captured"), RecordTy);
+
+  RecordDecl::field_iterator CurField = RD->field_begin();
+  for (CapturedStmt::capture_init_iterator I = S.capture_init_begin(),
+                                           E = S.capture_init_end();
+       I != E; ++I, ++CurField) {
+    LValue LV = CGF.EmitLValueForFieldInitialization(SlotLV, *CurField);
+    CGF.EmitInitializerForField(*CurField, LV, *I, ArrayRef<VarDecl *>());
+  }
+
+  return SlotLV;
+}
+
+/// Generate an outlined function for the body of a CapturedStmt, store any
+/// captured variables into the captured struct, and call the outlined function.
+llvm::Function *
+CodeGenFunction::EmitCapturedStmt(const CapturedStmt &S, CapturedRegionKind K) {
+  const CapturedDecl *CD = S.getCapturedDecl();
+  const RecordDecl *RD = S.getCapturedRecordDecl();
+  assert(CD->hasBody() && "missing CapturedDecl body");
+
+  LValue CapStruct = InitCapturedStruct(*this, S);
+
+  // Emit the CapturedDecl
+  CodeGenFunction CGF(CGM, true);
+  CGF.CapturedStmtInfo = new CGCapturedStmtInfo(S, K);
+  llvm::Function *F = CGF.GenerateCapturedStmtFunction(CD, RD);
+  delete CGF.CapturedStmtInfo;
+
+  // Emit call to the helper function.
+  EmitCallOrInvoke(F, CapStruct.getAddress());
+
+  return F;
+}
+
+/// Creates the outlined function for a CapturedStmt.
+llvm::Function *
+CodeGenFunction::GenerateCapturedStmtFunction(const CapturedDecl *CD,
+                                              const RecordDecl *RD) {
+  assert(CapturedStmtInfo &&
+    "CapturedStmtInfo should be set when generating the captured function");
+
+  // Check if we should generate debug info for this function.
+  maybeInitializeDebugInfo();
+
+  // Build the argument list.
+  ASTContext &Ctx = CGM.getContext();
+  FunctionArgList Args;
+  Args.append(CD->param_begin(), CD->param_end());
+
+  // Create the function declaration.
+  FunctionType::ExtInfo ExtInfo;
+  const CGFunctionInfo &FuncInfo =
+    CGM.getTypes().arrangeFunctionDeclaration(Ctx.VoidTy, Args, ExtInfo,
+                                              /*IsVariadic=*/false);
+  llvm::FunctionType *FuncLLVMTy = CGM.getTypes().GetFunctionType(FuncInfo);
+
+  llvm::Function *F =
+    llvm::Function::Create(FuncLLVMTy, llvm::GlobalValue::InternalLinkage,
+                           CapturedStmtInfo->getHelperName(), &CGM.getModule());
+  CGM.SetInternalFunctionAttributes(CD, F, FuncInfo);
+
+  // Generate the function.
+  StartFunction(CD, Ctx.VoidTy, F, FuncInfo, Args, CD->getBody()->getLocStart());
+
+  // Set the context parameter in CapturedStmtInfo.
+  llvm::Value *DeclPtr = LocalDeclMap[CD->getContextParam()];
+  assert(DeclPtr && "missing context parameter for CapturedStmt");
+  CapturedStmtInfo->setContextValue(Builder.CreateLoad(DeclPtr));
+
+  // If 'this' is captured, load it into CXXThisValue.
+  if (CapturedStmtInfo->isCXXThisExprCaptured()) {
+    FieldDecl *FD = CapturedStmtInfo->getThisFieldDecl();
+    LValue LV = MakeNaturalAlignAddrLValue(CapturedStmtInfo->getContextValue(),
+                                           Ctx.getTagDeclType(RD));
+    LValue ThisLValue = EmitLValueForField(LV, FD);
+
+    CXXThisValue = EmitLoadOfLValue(ThisLValue).getScalarVal();
+  }
+
+  CapturedStmtInfo->EmitBody(*this, CD->getBody());
+  FinishFunction(CD->getBodyRBrace());
+
+  return F;
 }

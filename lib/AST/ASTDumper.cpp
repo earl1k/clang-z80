@@ -449,9 +449,7 @@ void ASTDumper::dumpBareDeclRef(const Decl *D) {
 
   if (const NamedDecl *ND = dyn_cast<NamedDecl>(D)) {
     ColorScope Color(*this, DeclNameColor);
-    OS << " '";
-    ND->getDeclName().printName(OS);
-    OS << "'";
+    OS << " '" << ND->getDeclName() << '\'';
   }
 
   if (const ValueDecl *VD = dyn_cast<ValueDecl>(D))
@@ -853,8 +851,11 @@ void ASTDumper::VisitVarDecl(const VarDecl *D) {
   StorageClass SC = D->getStorageClass();
   if (SC != SC_None)
     OS << ' ' << VarDecl::getStorageClassSpecifierString(SC);
-  if (D->isThreadSpecified())
-    OS << " __thread";
+  switch (D->getTLSKind()) {
+  case VarDecl::TLS_None: break;
+  case VarDecl::TLS_Static: OS << " tls"; break;
+  case VarDecl::TLS_Dynamic: OS << " tls_dynamic"; break;
+  }
   if (D->isModulePrivate())
     OS << " __module_private__";
   if (D->isNRVOVariable())
@@ -1328,7 +1329,7 @@ void ASTDumper::dumpStmt(const Stmt *S) {
     return;
   }
 
-  setMoreChildren(S->children());
+  setMoreChildren(!S->children().empty());
   ConstStmtVisitor<ASTDumper>::Visit(S);
   setMoreChildren(false);
   for (Stmt::const_child_range CI = S->children(); CI; ++CI) {
