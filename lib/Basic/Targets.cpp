@@ -5219,7 +5219,7 @@ namespace {
   class Z80TargetInfo : public TargetInfo {
     static const char *const GCCRegNames[];
   public:
-    Z80TargetInfo(const std::string &triple) : TargetInfo(triple) {
+    Z80TargetInfo(const llvm::Triple &Triple) : TargetInfo(Triple) {
       BigEndian = false;
       TLSSupported = false;
       IntWidth = 16; IntAlign = 8;
@@ -5570,7 +5570,7 @@ static TargetInfo *AllocateTarget(const llvm::Triple &Triple) {
       return new SPIR64TargetInfo(Triple);
     }
   case llvm::Triple::z80:
-    return new Z80TargetInfo(T);
+    return new Z80TargetInfo(Triple);
   }
 }
 
