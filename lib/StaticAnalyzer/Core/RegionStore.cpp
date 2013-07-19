@@ -377,7 +377,7 @@ public:
   ///  version of that lvalue (i.e., a pointer to the first element of
   ///  the array).  This is called by ExprEngine when evaluating
   ///  casts from arrays to pointers.
-  SVal ArrayToPointer(Loc Array);
+  SVal ArrayToPointer(Loc Array, QualType ElementTy);
 
   StoreRef getInitialStore(const LocationContext *InitLoc) {
     return StoreRef(RBFactory.getEmptyMap().getRootWithoutRetain(), *this);
@@ -1250,23 +1250,13 @@ RegionStoreManager::getSizeInElements(ProgramStateRef state,
 ///  version of that lvalue (i.e., a pointer to the first element of
 ///  the array).  This is called by ExprEngine when evaluating casts
 ///  from arrays to pointers.
-SVal RegionStoreManager::ArrayToPointer(Loc Array) {
+SVal RegionStoreManager::ArrayToPointer(Loc Array, QualType T) {
   if (!Array.getAs<loc::MemRegionVal>())
     return UnknownVal();
 
   const MemRegion* R = Array.castAs<loc::MemRegionVal>().getRegion();
-  const TypedValueRegion* ArrayR = dyn_cast<TypedValueRegion>(R);
-
-  if (!ArrayR)
-    return UnknownVal();
-
-  // Strip off typedefs from the ArrayRegion's ValueType.
-  QualType T = ArrayR->getValueType().getDesugaredType(Ctx);
-  const ArrayType *AT = cast<ArrayType>(T);
-  T = AT->getElementType();
-
   NonLoc ZeroIdx = svalBuilder.makeZeroArrayIndex();
-  return loc::MemRegionVal(MRMgr.getElementRegion(T, ZeroIdx, ArrayR, Ctx));
+  return loc::MemRegionVal(MRMgr.getElementRegion(T, ZeroIdx, R, Ctx));
 }
 
 //===----------------------------------------------------------------------===//
@@ -1507,7 +1497,7 @@ SVal RegionStoreManager::getBindingForElement(RegionBindingsConstRef B,
     // FIXME: Handle loads from strings where the literal is treated as
     // an integer, e.g., *((unsigned int*)"hello")
     QualType T = Ctx.getAsArrayType(StrR->getValueType())->getElementType();
-    if (T != Ctx.getCanonicalType(R->getElementType()))
+    if (!Ctx.hasSameUnqualifiedType(T, R->getElementType()))
       return UnknownVal();
 
     const StringLiteral *Str = StrR->getStringLiteral();

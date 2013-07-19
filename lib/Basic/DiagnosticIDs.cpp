@@ -15,6 +15,7 @@
 #include "clang/Basic/AllDiagnostics.h"
 #include "clang/Basic/DiagnosticCategories.h"
 #include "clang/Basic/SourceManager.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <map>
@@ -86,24 +87,20 @@ static const StaticDiagInfoRec StaticDiagInfo[] = {
 };
 
 static const unsigned StaticDiagInfoSize =
-  sizeof(StaticDiagInfo)/sizeof(StaticDiagInfo[0])-1;
+  llvm::array_lengthof(StaticDiagInfo)-1;
 
 /// GetDiagInfo - Return the StaticDiagInfoRec entry for the specified DiagID,
 /// or null if the ID is invalid.
 static const StaticDiagInfoRec *GetDiagInfo(unsigned DiagID) {
   // If assertions are enabled, verify that the StaticDiagInfo array is sorted.
 #ifndef NDEBUG
-  static bool IsFirst = true;
-  if (IsFirst) {
-    for (unsigned i = 1; i != StaticDiagInfoSize; ++i) {
-      assert(StaticDiagInfo[i-1].DiagID != StaticDiagInfo[i].DiagID &&
-             "Diag ID conflict, the enums at the start of clang::diag (in "
-             "DiagnosticIDs.h) probably need to be increased");
+  for (unsigned i = 1; i != StaticDiagInfoSize; ++i) {
+    assert(StaticDiagInfo[i-1].DiagID != StaticDiagInfo[i].DiagID &&
+           "Diag ID conflict, the enums at the start of clang::diag (in "
+           "DiagnosticIDs.h) probably need to be increased");
 
-      assert(StaticDiagInfo[i-1] < StaticDiagInfo[i] &&
-             "Improperly sorted diag info");
-    }
-    IsFirst = false;
+    assert(StaticDiagInfo[i-1] < StaticDiagInfo[i] &&
+           "Improperly sorted diag info");
   }
 #endif
 
@@ -224,7 +221,7 @@ static const StaticDiagCategoryRec CategoryNameTable[] = {
 
 /// getNumberOfCategories - Return the number of categories
 unsigned DiagnosticIDs::getNumberOfCategories() {
-  return sizeof(CategoryNameTable) / sizeof(CategoryNameTable[0])-1;
+  return llvm::array_lengthof(CategoryNameTable) - 1;
 }
 
 /// getCategoryNameFromID - Given a category ID, return the name of the
@@ -528,8 +525,7 @@ static const WarningOption OptionTable[] = {
 #include "clang/Basic/DiagnosticGroups.inc"
 #undef GET_DIAG_TABLE
 };
-static const size_t OptionTableSize =
-sizeof(OptionTable) / sizeof(OptionTable[0]);
+static const size_t OptionTableSize = llvm::array_lengthof(OptionTable);
 
 static bool WarningOptionCompare(const WarningOption &LHS,
                                  const WarningOption &RHS) {

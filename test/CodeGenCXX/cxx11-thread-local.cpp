@@ -35,7 +35,7 @@ int e = V<int>::m;
 
 // CHECK: @_ZZ8tls_dtorvE1u = internal thread_local global
 // CHECK: @_ZGVZ8tls_dtorvE1u = internal thread_local global i8 0
-// CHECK: @_ZGRZ8tls_dtorvE1u = internal thread_local global
+// CHECK: @_ZGRZ8tls_dtorvE1u = private thread_local global
 
 // CHECK: @_ZGVN1VIiE1mE = weak_odr thread_local global i64 0
 
@@ -127,6 +127,13 @@ void tls_dtor() {
 }
 
 // CHECK: declare i32 @__cxa_thread_atexit(void (i8*)*, i8*, i8*)
+
+// CHECK: define {{.*}} @_Z7PR15991v(
+int PR15991() {
+  thread_local int n;
+  auto l = [] { return n; };
+  return l();
+}
 
 // CHECK: define {{.*}} @[[V_M_INIT:.*]]()
 // CHECK: load i8* bitcast (i64* @_ZGVN1VIiE1mE to i8*)

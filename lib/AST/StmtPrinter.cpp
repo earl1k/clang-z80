@@ -580,6 +580,67 @@ void StmtPrinter::VisitSEHFinallyStmt(SEHFinallyStmt *Node) {
 }
 
 //===----------------------------------------------------------------------===//
+//  OpenMP clauses printing methods
+//===----------------------------------------------------------------------===//
+
+namespace {
+class OMPClausePrinter : public OMPClauseVisitor<OMPClausePrinter> {
+  raw_ostream &OS;
+public:
+  OMPClausePrinter(raw_ostream &OS) : OS(OS) { }
+#define OPENMP_CLAUSE(Name, Class)                              \
+  void Visit##Class(Class *S);
+#include "clang/Basic/OpenMPKinds.def"
+};
+
+void OMPClausePrinter::VisitOMPDefaultClause(OMPDefaultClause *Node) {
+  OS << "default("
+     << getOpenMPSimpleClauseTypeName(OMPC_default, Node->getDefaultKind())
+     << ")";
+}
+
+#define PROCESS_OMP_CLAUSE_LIST(Class, Node, StartSym)                         \
+  for (OMPVarList<Class>::varlist_iterator I = Node->varlist_begin(),          \
+                                           E = Node->varlist_end();            \
+         I != E; ++I)                                                          \
+    OS << (I == Node->varlist_begin() ? StartSym : ',')                        \
+       << *cast<NamedDecl>(cast<DeclRefExpr>(*I)->getDecl());
+
+void OMPClausePrinter::VisitOMPPrivateClause(OMPPrivateClause *Node) {
+  if (!Node->varlist_empty()) {
+    OS << "private";
+    PROCESS_OMP_CLAUSE_LIST(OMPPrivateClause, Node, '(')
+    OS << ")";
+  }
+}
+
+#undef PROCESS_OMP_CLAUSE_LIST
+}
+
+//===----------------------------------------------------------------------===//
+//  OpenMP directives printing methods
+//===----------------------------------------------------------------------===//
+
+void StmtPrinter::VisitOMPParallelDirective(OMPParallelDirective *Node) {
+  Indent() << "#pragma omp parallel ";
+
+  OMPClausePrinter Printer(OS);
+  ArrayRef<OMPClause *> Clauses = Node->clauses();
+  for (ArrayRef<OMPClause *>::iterator I = Clauses.begin(), E = Clauses.end();
+       I != E; ++I)
+    if (*I && !(*I)->isImplicit()) {
+      Printer.Visit(*I);
+      OS << ' ';
+    }
+  OS << "\n";
+  if (Node->getAssociatedStmt()) {
+    assert(isa<CapturedStmt>(Node->getAssociatedStmt()) &&
+           "Expected captured statement!");
+    Stmt *CS = cast<CapturedStmt>(Node->getAssociatedStmt())->getCapturedStmt();
+    PrintStmt(CS);
+  }
+}
+//===----------------------------------------------------------------------===//
 //  Expr printing methods.
 //===----------------------------------------------------------------------===//
 
@@ -1339,6 +1400,8 @@ void StmtPrinter::VisitCXXTemporaryObjectExpr(CXXTemporaryObjectExpr *Node) {
   for (CXXTemporaryObjectExpr::arg_iterator Arg = Node->arg_begin(),
                                          ArgEnd = Node->arg_end();
        Arg != ArgEnd; ++Arg) {
+    if (Arg->isDefaultArgument())
+      break;
     if (Arg != Node->arg_begin())
       OS << ", ";
     PrintExpr(*Arg);
@@ -1386,6 +1449,13 @@ void StmtPrinter::VisitLambdaExpr(LambdaExpr *Node) {
       if (Node->getCaptureDefault() != LCD_ByCopy)
         OS << '=';
       OS << C->getCapturedVar()->getName();
+      break;
+
+    case LCK_Init:
+      if (C->getInitCaptureField()->getType()->isReferenceType())
+        OS << '&';
+      OS << C->getInitCaptureField()->getName();
+      PrintExpr(Node->getInitCaptureInit(C));
       break;
     }
   }
@@ -1523,6 +1593,10 @@ void StmtPrinter::VisitCXXConstructExpr(CXXConstructExpr *E) {
 
   if (E->isListInitialization())
     OS << " }";
+}
+
+void StmtPrinter::VisitCXXStdInitializerListExpr(CXXStdInitializerListExpr *E) {
+  PrintExpr(E->getSubExpr());
 }
 
 void StmtPrinter::VisitExprWithCleanups(ExprWithCleanups *E) {

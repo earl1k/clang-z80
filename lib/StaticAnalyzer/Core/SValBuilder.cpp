@@ -266,6 +266,17 @@ Optional<SVal> SValBuilder::getConstantVal(const Expr *E) {
   case Stmt::CXXNullPtrLiteralExprClass:
     return makeNull();
 
+  case Stmt::ImplicitCastExprClass: {
+    const CastExpr *CE = cast<CastExpr>(E);
+    if (CE->getCastKind() == CK_ArrayToPointerDecay) {
+      Optional<SVal> ArrayVal = getConstantVal(CE->getSubExpr());
+      if (!ArrayVal)
+        return None;
+      return evalCast(*ArrayVal, CE->getType(), CE->getSubExpr()->getType());
+    }
+    // FALLTHROUGH
+  }
+
   // If we don't have a special case, fall back to the AST's constant evaluator.
   default: {
     // Don't try to come up with a value for materialized temporaries.
@@ -435,9 +446,11 @@ SVal SValBuilder::evalCast(SVal val, QualType castTy, QualType originalTy) {
   }
 
   // Check for casts from array type to another type.
-  if (originalTy->isArrayType()) {
+  if (const ArrayType *arrayT =
+                      dyn_cast<ArrayType>(originalTy.getCanonicalType())) {
     // We will always decay to a pointer.
-    val = StateMgr.ArrayToPointer(val.castAs<Loc>());
+    QualType elemTy = arrayT->getElementType();
+    val = StateMgr.ArrayToPointer(val.castAs<Loc>(), elemTy);
 
     // Are we casting from an array to a pointer?  If so just pass on
     // the decayed value.

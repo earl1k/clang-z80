@@ -18,6 +18,7 @@
 #include "clang/AST/Stmt.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/AST/StmtObjC.h"
+#include "clang/AST/StmtOpenMP.h"
 #include "clang/AST/Type.h"
 #include "clang/Basic/CharInfo.h"
 #include "clang/Basic/TargetInfo.h"
@@ -296,28 +297,6 @@ AttributedStmt *AttributedStmt::CreateEmpty(ASTContext &C, unsigned NumAttrs) {
                          sizeof(Attr*) * (NumAttrs - 1),
                          llvm::alignOf<AttributedStmt>());
   return new (Mem) AttributedStmt(EmptyShell(), NumAttrs);
-}
-
-bool Stmt::hasImplicitControlFlow() const {
-  switch (StmtBits.sClass) {
-    default:
-      return false;
-
-    case CallExprClass:
-    case ConditionalOperatorClass:
-    case ChooseExprClass:
-    case StmtExprClass:
-    case DeclStmtClass:
-      return true;
-
-    case Stmt::BinaryOperatorClass: {
-      const BinaryOperator* B = cast<BinaryOperator>(this);
-      if (B->isLogicalOp() || B->getOpcode() == BO_Comma)
-        return true;
-      else
-        return false;
-    }
-  }
 }
 
 std::string AsmStmt::generateAsmString(ASTContext &C) const {
@@ -1128,7 +1107,7 @@ Stmt::child_range CapturedStmt::children() {
 bool CapturedStmt::capturesVariable(const VarDecl *Var) const {
   for (const_capture_iterator I = capture_begin(),
                               E = capture_end(); I != E; ++I) {
-    if (I->capturesThis())
+    if (!I->capturesVariable())
       continue;
 
     // This does not handle variable redeclarations. This should be
@@ -1139,4 +1118,55 @@ bool CapturedStmt::capturesVariable(const VarDecl *Var) const {
   }
 
   return false;
+}
+
+OMPPrivateClause *OMPPrivateClause::Create(ASTContext &C,
+                                           SourceLocation StartLoc,
+                                           SourceLocation LParenLoc,
+                                           SourceLocation EndLoc,
+                                           ArrayRef<Expr *> VL) {
+  void *Mem = C.Allocate(sizeof(OMPPrivateClause) + sizeof(Expr *) * VL.size(),
+                         llvm::alignOf<OMPPrivateClause>());
+  OMPPrivateClause *Clause = new (Mem) OMPPrivateClause(StartLoc, LParenLoc,
+                                                        EndLoc, VL.size());
+  Clause->setVarRefs(VL);
+  return Clause;
+}
+
+OMPPrivateClause *OMPPrivateClause::CreateEmpty(ASTContext &C,
+                                                unsigned N) {
+  void *Mem = C.Allocate(sizeof(OMPPrivateClause) + sizeof(Expr *) * N,
+                         llvm::alignOf<OMPPrivateClause>());
+  return new (Mem) OMPPrivateClause(N);
+}
+
+void OMPExecutableDirective::setClauses(ArrayRef<OMPClause *> Clauses) {
+  assert(Clauses.size() == this->Clauses.size() &&
+         "Number of clauses is not the same as the preallocated buffer");
+  std::copy(Clauses.begin(), Clauses.end(), this->Clauses.begin());
+}
+
+OMPParallelDirective *OMPParallelDirective::Create(
+                                              ASTContext &C,
+                                              SourceLocation StartLoc,
+                                              SourceLocation EndLoc,
+                                              ArrayRef<OMPClause *> Clauses,
+                                              Stmt *AssociatedStmt) {
+  void *Mem = C.Allocate(sizeof(OMPParallelDirective) +
+                         sizeof(OMPClause *) * Clauses.size() + sizeof(Stmt *),
+                         llvm::alignOf<OMPParallelDirective>());
+  OMPParallelDirective *Dir = new (Mem) OMPParallelDirective(StartLoc, EndLoc,
+                                                             Clauses.size());
+  Dir->setClauses(Clauses);
+  Dir->setAssociatedStmt(AssociatedStmt);
+  return Dir;
+}
+
+OMPParallelDirective *OMPParallelDirective::CreateEmpty(ASTContext &C,
+                                                        unsigned N,
+                                                        EmptyShell) {
+  void *Mem = C.Allocate(sizeof(OMPParallelDirective) +
+                         sizeof(OMPClause *) * N + sizeof(Stmt *),
+                         llvm::alignOf<OMPParallelDirective>());
+  return new (Mem) OMPParallelDirective(N);
 }

@@ -119,7 +119,7 @@ bool AnalyzerOptions::getBooleanOption(Optional<bool> &V, StringRef Name,
 bool AnalyzerOptions::includeTemporaryDtorsInCFG() {
   return getBooleanOption(IncludeTemporaryDtorsInCFG,
                           "cfg-temporary-dtors",
-                          /* Default = */ false);
+                          /* Default = */ true);
 }
 
 bool AnalyzerOptions::mayInlineCXXStandardLibrary() {
@@ -137,6 +137,12 @@ bool AnalyzerOptions::mayInlineTemplateFunctions() {
 bool AnalyzerOptions::mayInlineCXXContainerCtorsAndDtors() {
   return getBooleanOption(InlineCXXContainerCtorsAndDtors,
                           "c++-container-inlining",
+                          /*Default=*/false);
+}
+
+bool AnalyzerOptions::mayInlineCXXSharedPtrDtor() {
+  return getBooleanOption(InlineCXXSharedPtrDtor,
+                          "c++-shared_ptr-inlining",
                           /*Default=*/false);
 }
 
@@ -168,6 +174,12 @@ bool AnalyzerOptions::shouldSuppressInlinedDefensiveChecks() {
 bool AnalyzerOptions::shouldSuppressFromCXXStandardLibrary() {
   return getBooleanOption(SuppressFromCXXStandardLibrary,
                           "suppress-c++-stdlib",
+                          /* Default = */ false);
+}
+
+bool AnalyzerOptions::shouldReportIssuesInMainSourceFile() {
+  return getBooleanOption(ReportIssuesInMainSourceFile,
+                          "report-in-main-source-file",
                           /* Default = */ false);
 }
 

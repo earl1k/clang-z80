@@ -1,5 +1,5 @@
 // RUN: %clang_cc1 -pedantic -Wall -Wno-comment -verify -fcxx-exceptions -x c++ %s
-// RUN: %clang_cc1 -fsyntax-only -fdiagnostics-parseable-fixits -x c++ %s 2>&1 | FileCheck %s
+// RUN: not %clang_cc1 -fsyntax-only -fdiagnostics-parseable-fixits -x c++ %s 2>&1 | FileCheck %s
 // RUN: cp %s %t
 // RUN: not %clang_cc1 -pedantic -Wall -Wno-comment -fcxx-exceptions -fixit -x c++ %t
 // RUN: %clang_cc1 -fsyntax-only -pedantic -Wall -Werror -Wno-comment -fcxx-exceptions -x c++ %t
@@ -306,4 +306,23 @@ namespace dtor_fixit {
     ~bar() { }  // expected-error {{expected the class name after '~' to name a destructor}}
     // CHECK: fix-it:"{{.*}}":{[[@LINE-1]]:6-[[@LINE-1]]:9}:"foo"
   };
+}
+
+namespace PR5066 {
+  template<typename T> struct X {};
+  X<int *p> x; // expected-error {{type-id cannot have a name}}
+}
+
+namespace PR5898 {
+  class A {
+  public:
+    const char *str();
+  };
+  const char* foo(A &x)
+  {
+    return x.str.();  // expected-error {{unexpected '.' in function call; perhaps remove the '.'?}}
+  }
+  bool bar(A x, const char *y) {
+    return foo->(x) == y;  // expected-error {{unexpected '->' in function call; perhaps remove the '->'?}}
+  }
 }

@@ -20,8 +20,8 @@ to format C/C++/Obj-C code.
 
   If no arguments are specified, it formats the code from standard input
   and writes the result to the standard output.
-  If <file>s are given, it reformats the files. If -i is specified
-  together with <file>s, the files are edited in-place. Otherwise, the
+  If <file>s are given, it reformats the files. If -i is specified 
+  together with <file>s, the files are edited in-place. Otherwise, the 
   result is written to the standard output.
 
   USAGE: clang-format [options] [<file> ...]
@@ -47,10 +47,13 @@ to format C/C++/Obj-C code.
     -output-replacements-xml - Output replacements as XML.
     -style=<string>          - Coding style, currently supports:
                                  LLVM, Google, Chromium, Mozilla.
-                               Use '-style file' to load style configuration from
+                               Use -style=file to load style configuration from
                                .clang-format file located in one of the parent
                                directories of the source file (or current
                                directory for stdin).
+                               Use -style="{key: value, ...}" to set specific
+                               parameters, e.g.:
+                                 -style="{BasedOnStyle: llvm, IndentWidth: 8}"
 
   General options:
 
@@ -139,7 +142,7 @@ So to reformat all the lines in the latest :program:`git` commit, just do:
 
 .. code-block:: console
 
-  git diff -U0 HEAD^ | clang-format-diff.py
+  git diff -U0 HEAD^ | clang-format-diff.py -p1
 
 The :option:`-U0` will create a diff without context lines (the script would format
 those as well).

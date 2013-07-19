@@ -33,11 +33,20 @@ struct FormatStyle {
   /// \brief The column limit.
   unsigned ColumnLimit;
 
+  /// \brief The maximum number of consecutive empty lines to keep.
+  unsigned MaxEmptyLinesToKeep;
+
+  /// \brief The penalty for each line break introduced inside a comment.
+  unsigned PenaltyBreakComment;
+
+  /// \brief The penalty for each line break introduced inside a string literal.
+  unsigned PenaltyBreakString;
+
   /// \brief The penalty for each character outside of the column limit.
   unsigned PenaltyExcessCharacter;
 
-  /// \brief The maximum number of consecutive empty lines to keep.
-  unsigned MaxEmptyLinesToKeep;
+  /// \brief The penalty for breaking before the first "<<".
+  unsigned PenaltyBreakFirstLessLess;
 
   /// \brief Set whether & and * bind to the type as opposed to the variable.
   bool PointerBindsToType;
@@ -71,6 +80,18 @@ struct FormatStyle {
   /// will either all be on the same line or will have one line each.
   bool BinPackParameters;
 
+  /// \brief If true, clang-format detects whether function calls and
+  /// definitions are formatted with one parameter per line.
+  ///
+  /// Each call can be bin-packed, one-per-line or inconclusive. If it is
+  /// inconclusive, e.g. completely on one line, but a decision needs to be
+  /// made, clang-format analyzes whether there are other bin-packed cases in
+  /// the input file and act accordingly.
+  ///
+  /// NOTE: This is an experimental flag, that might go away or be renamed. Do
+  /// not use this in config files, etc. Use at your own risk.
+  bool ExperimentalAutoDetectBinPacking;
+
   /// \brief Allow putting all parameters of a function declaration onto
   /// the next line even if \c BinPackParameters is \c false.
   bool AllowAllParametersOfDeclarationOnNextLine;
@@ -86,6 +107,9 @@ struct FormatStyle {
   /// \brief If true, "if (a) return;" can be put on a single line.
   bool AllowShortIfStatementsOnASingleLine;
 
+  /// \brief If true, "while (true) continue;" can be put on a single line.
+  bool AllowShortLoopsOnASingleLine;
+
   /// \brief Add a space in front of an Objective-C protocol list, i.e. use
   /// Foo <Protocol> instead of Foo<Protocol>.
   bool ObjCSpaceBeforeProtocolList;
@@ -96,6 +120,13 @@ struct FormatStyle {
 
   /// \brief The number of characters to use for indentation.
   unsigned IndentWidth;
+
+  /// \brief If \c true, always break after the \c template<...> of a template
+  /// declaration.
+  bool AlwaysBreakTemplateDeclarations;
+
+  /// \brief If \c true, always break before multiline string literals.
+  bool AlwaysBreakBeforeMultilineStrings;
 
   /// \brief If true, \c IndentWidth consecutive spaces will be replaced with
   /// tab characters.
@@ -115,6 +146,25 @@ struct FormatStyle {
   /// \brief The brace breaking style to use.
   BraceBreakingStyle BreakBeforeBraces;
 
+  /// \brief If \c true, format braced lists as best suited for C++11 braced
+  /// lists.
+  ///
+  /// Important differences:
+  /// - No spaces inside the braced list.
+  /// - No line break before the closing brace.
+  /// - Indentation with the continuation indent, not with the block indent.
+  ///
+  /// Fundamentally, C++11 braced lists are formatted exactly like function
+  /// calls would be formatted in their place. If the braced list follows a name
+  /// (e.g. a type or variable name), clang-format formats as if the "{}" were
+  /// the parentheses of a function call with that name. If there is no name,
+  /// a zero-length name is assumed.
+  bool Cpp11BracedListStyle;
+
+  /// \brief If \c true, indent when breaking function declarations which
+  /// are not also definitions after the type.
+  bool IndentFunctionDeclarationAfterType;
+
   bool operator==(const FormatStyle &R) const {
     return AccessModifierOffset == R.AccessModifierOffset &&
            AlignEscapedNewlinesLeft == R.AlignEscapedNewlinesLeft &&
@@ -122,24 +172,34 @@ struct FormatStyle {
                R.AllowAllParametersOfDeclarationOnNextLine &&
            AllowShortIfStatementsOnASingleLine ==
                R.AllowShortIfStatementsOnASingleLine &&
+           AlwaysBreakTemplateDeclarations ==
+               R.AlwaysBreakTemplateDeclarations &&
+           AlwaysBreakBeforeMultilineStrings ==
+               R.AlwaysBreakBeforeMultilineStrings &&
            BinPackParameters == R.BinPackParameters &&
+           BreakBeforeBraces == R.BreakBeforeBraces &&
            ColumnLimit == R.ColumnLimit &&
            ConstructorInitializerAllOnOneLineOrOnePerLine ==
                R.ConstructorInitializerAllOnOneLineOrOnePerLine &&
            DerivePointerBinding == R.DerivePointerBinding &&
+           ExperimentalAutoDetectBinPacking ==
+               R.ExperimentalAutoDetectBinPacking &&
            IndentCaseLabels == R.IndentCaseLabels &&
+           IndentWidth == R.IndentWidth &&
            MaxEmptyLinesToKeep == R.MaxEmptyLinesToKeep &&
            ObjCSpaceBeforeProtocolList == R.ObjCSpaceBeforeProtocolList &&
+           PenaltyBreakComment == R.PenaltyBreakComment &&
+           PenaltyBreakFirstLessLess == R.PenaltyBreakFirstLessLess &&
+           PenaltyBreakString == R.PenaltyBreakString &&
            PenaltyExcessCharacter == R.PenaltyExcessCharacter &&
            PenaltyReturnTypeOnItsOwnLine == R.PenaltyReturnTypeOnItsOwnLine &&
            PointerBindsToType == R.PointerBindsToType &&
            SpacesBeforeTrailingComments == R.SpacesBeforeTrailingComments &&
-           Standard == R.Standard &&
-           IndentWidth == R.IndentWidth &&
-           UseTab == R.UseTab &&
-           BreakBeforeBraces == R.BreakBeforeBraces;
+           Cpp11BracedListStyle == R.Cpp11BracedListStyle &&
+           Standard == R.Standard && UseTab == R.UseTab &&
+           IndentFunctionDeclarationAfterType ==
+               R.IndentFunctionDeclarationAfterType;
   }
-
 };
 
 /// \brief Returns a format style complying with the LLVM coding standards:
@@ -158,11 +218,13 @@ FormatStyle getChromiumStyle();
 /// https://developer.mozilla.org/en-US/docs/Developer_Guide/Coding_Style.
 FormatStyle getMozillaStyle();
 
-/// \brief Returns a predefined style by name.
+/// \brief Gets a predefined style by name.
 ///
 /// Currently supported names: LLVM, Google, Chromium, Mozilla. Names are
 /// compared case-insensitively.
-FormatStyle getPredefinedStyle(StringRef Name);
+///
+/// Returns true if the Style has been set.
+bool getPredefinedStyle(StringRef Name, FormatStyle *Style);
 
 /// \brief Parse configuration from YAML-formatted text.
 llvm::error_code parseConfiguration(StringRef Text, FormatStyle *Style);
@@ -183,8 +245,19 @@ tooling::Replacements reformat(const FormatStyle &Style, Lexer &Lex,
                                SourceManager &SourceMgr,
                                std::vector<CharSourceRange> Ranges);
 
+/// \brief Reformats the given \p Ranges in \p Code.
+///
+/// Otherwise identical to the reformat() function consuming a \c Lexer.
+tooling::Replacements reformat(const FormatStyle &Style, StringRef Code,
+                               std::vector<tooling::Range> Ranges,
+                               StringRef FileName = "<stdin>");
+
 /// \brief Returns the \c LangOpts that the formatter expects you to set.
-LangOptions getFormattingLangOpts();
+///
+/// \param Standard determines lexing mode: LC_Cpp11 and LS_Auto turn on C++11
+/// lexing mode, LS_Cpp03 - C++03 mode.
+LangOptions getFormattingLangOpts(FormatStyle::LanguageStandard Standard =
+                                      FormatStyle::LS_Cpp11);
 
 } // end namespace format
 } // end namespace clang

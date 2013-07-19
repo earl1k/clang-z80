@@ -9,6 +9,8 @@
 ;; Depending on your configuration and coding style, you might need to modify
 ;; 'style' in clang-format, below.
 
+(require 'json)
+
 ;; *Location of the clang-format binary. If it is on your PATH, a full path name
 ;; need not be specified.
 (defvar clang-format-binary "clang-format")
@@ -26,6 +28,7 @@
 
 (defun clang-format-buffer ()
   "Use clang-format to format the current buffer."
+  (interactive)
   (clang-format (point-min) (point-max)))
 
 (defun clang-format (begin end)
@@ -38,8 +41,14 @@
         (call-process-region (point-min) (point-max) clang-format-binary t t nil
                              "-offset" (number-to-string (1- begin))
                              "-length" (number-to-string (- end begin))
+                             "-cursor" (number-to-string (1- (point)))
                              "-style" style)
-      (goto-char orig-point)
-      (dotimes (index (length orig-windows))
-        (set-window-start (nth index orig-windows)
-                          (nth index orig-window-starts))))))
+      (goto-char (point-min))
+      (let ((json-output (json-read-from-string
+                           (buffer-substring-no-properties
+                             (point-min) (line-beginning-position 2)))))
+        (delete-region (point-min) (line-beginning-position 2))
+        (goto-char (1+ (cdr (assoc 'Cursor json-output))))
+        (dotimes (index (length orig-windows))
+          (set-window-start (nth index orig-windows)
+                            (nth index orig-window-starts)))))))

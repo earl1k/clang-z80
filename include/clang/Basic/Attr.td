@@ -172,7 +172,7 @@ def AlignMac68k : InheritableAttr {
   let SemaHandler = 0;
 }
 
-def AllocSize : Attr {
+def AllocSize : InheritableAttr {
   let Spellings = [GNU<"alloc_size">, CXX11<"gnu", "alloc_size">];
   let Args = [VariadicUnsignedArgument<"Args">];
 }
@@ -326,7 +326,7 @@ def CXX11NoReturn : InheritableAttr {
   let Subjects = [Function];
 }
 
-def OpenCLKernel : Attr {
+def OpenCLKernel : InheritableAttr {
   let Spellings = [Keyword<"__kernel">, Keyword<"kernel">];
 }
 
@@ -441,7 +441,6 @@ def Mips16 : InheritableAttr {
 def Mode : Attr {
   let Spellings = [GNU<"mode">, CXX11<"gnu", "mode">];
   let Args = [IdentifierArgument<"Mode">];
-  let ASTNode = 0;
 }
 
 def Naked : InheritableAttr {
@@ -558,12 +557,12 @@ def ObjCNSObject : InheritableAttr {
   let Spellings = [GNU<"NSObject">];
 }
 
-def ObjCPreciseLifetime : Attr {
+def ObjCPreciseLifetime : InheritableAttr {
   let Spellings = [GNU<"objc_precise_lifetime">];
   let Subjects = [Var];
 }
 
-def ObjCReturnsInnerPointer : Attr {
+def ObjCReturnsInnerPointer : InheritableAttr {
   let Spellings = [GNU<"objc_returns_inner_pointer">];
   let Subjects = [ObjCMethod];
 }
@@ -573,7 +572,7 @@ def ObjCRequiresSuper : InheritableAttr {
   let Subjects = [ObjCMethod];
 }
 
-def ObjCRootClass : Attr {
+def ObjCRootClass : InheritableAttr {
   let Spellings = [GNU<"objc_root_class">];
   let Subjects = [ObjCInterface];
 }
@@ -693,7 +692,7 @@ def ObjCGC : Attr {
   let ASTNode = 0;
 }
 
-def ObjCOwnership : Attr {
+def ObjCOwnership : InheritableAttr {
   let Spellings = [GNU<"objc_ownership">];
   let Args = [IdentifierArgument<"Kind">];
   let ASTNode = 0;
@@ -852,6 +851,20 @@ def SharedLockFunction : InheritableAttr {
   let TemplateDependent = 1;
 }
 
+def AssertExclusiveLock : InheritableAttr {
+  let Spellings = [GNU<"assert_exclusive_lock">];
+  let Args = [VariadicExprArgument<"Args">];
+  let LateParsed = 1;
+  let TemplateDependent = 1;
+}
+
+def AssertSharedLock : InheritableAttr {
+  let Spellings = [GNU<"assert_shared_lock">];
+  let Args = [VariadicExprArgument<"Args">];
+  let LateParsed = 1;
+  let TemplateDependent = 1;
+}
+
 // The first argument is an integer or boolean value specifying the return value
 // of a successful lock acquisition.
 def ExclusiveTrylockFunction : InheritableAttr {
@@ -948,6 +961,10 @@ def ForceInline : InheritableAttr {
   let Spellings = [Keyword<"__forceinline">];
 }
 
+def SelectAny : InheritableAttr {
+  let Spellings = [Declspec<"selectany">];
+}
+
 def Win64 : InheritableAttr {
   let Spellings = [Keyword<"__w64">];
 }
@@ -958,6 +975,14 @@ def Ptr32 : InheritableAttr {
 
 def Ptr64 : InheritableAttr {
   let Spellings = [Keyword<"__ptr64">];
+}
+
+def SPtr : InheritableAttr {
+  let Spellings = [Keyword<"__sptr">];
+}
+
+def UPtr : InheritableAttr {
+  let Spellings = [Keyword<"__uptr">];
 }
 
 class MSInheritanceAttr : InheritableAttr;

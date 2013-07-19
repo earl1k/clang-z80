@@ -401,3 +401,34 @@ namespace LifetimeExtension {
     clang_analyzer_eval(SaveOnVirtualDestruct::lastOutput == 42); // expected-warning{{TRUE}}
   }
 }
+
+namespace NoReturn {
+  struct NR {
+    ~NR() __attribute__((noreturn));
+  };
+
+  void f(int **x) {
+    NR nr;
+  }
+
+  void g() {
+    int *x;
+    f(&x);
+    *x = 47; // no warning
+  }
+
+  void g2(int *x) {
+    if (! x) NR();
+    *x = 47; // no warning
+  }
+
+  void f3(int **x) {
+    NR();
+  }
+
+  void g3() {
+    int *x;
+    f3(&x);
+    *x = 47; // no warning
+  }
+}

@@ -134,7 +134,10 @@ CXXNewExpr::CXXNewExpr(ASTContext &C, bool globalNew, FunctionDecl *operatorNew,
     this->Range.setEnd(DirectInitRange.getEnd()); break;
   case ListInit:
     this->Range.setEnd(getInitializer()->getSourceRange().getEnd()); break;
-  default: break;
+  default:
+    if (TypeIdParens.isValid())
+      this->Range.setEnd(TypeIdParens.getEnd());
+    break;
   }
 }
 
@@ -811,7 +814,7 @@ CXXConstructExpr::CXXConstructExpr(ASTContext &C, StmtClass SC, QualType T,
 LambdaExpr::Capture::Capture(SourceLocation Loc, bool Implicit,
                              LambdaCaptureKind Kind, VarDecl *Var,
                              SourceLocation EllipsisLoc)
-  : VarAndBits(Var, 0), Loc(Loc), EllipsisLoc(EllipsisLoc)
+  : DeclAndBits(Var, 0), Loc(Loc), EllipsisLoc(EllipsisLoc)
 {
   unsigned Bits = 0;
   if (Implicit)
@@ -828,15 +831,27 @@ LambdaExpr::Capture::Capture(SourceLocation Loc, bool Implicit,
   case LCK_ByRef:
     assert(Var && "capture must have a variable!");
     break;
+
+  case LCK_Init:
+    llvm_unreachable("don't use this constructor for an init-capture");
   }
-  VarAndBits.setInt(Bits);
+  DeclAndBits.setInt(Bits);
 }
 
+LambdaExpr::Capture::Capture(FieldDecl *Field)
+    : DeclAndBits(Field,
+                  Field->getType()->isReferenceType() ? 0 : Capture_ByCopy),
+      Loc(Field->getLocation()), EllipsisLoc() {}
+
 LambdaCaptureKind LambdaExpr::Capture::getCaptureKind() const {
-  if (capturesThis())
+  Decl *D = DeclAndBits.getPointer();
+  if (!D)
     return LCK_This;
 
-  return (VarAndBits.getInt() & Capture_ByCopy)? LCK_ByCopy : LCK_ByRef;
+  if (isa<FieldDecl>(D))
+    return LCK_Init;
+
+  return (DeclAndBits.getInt() & Capture_ByCopy) ? LCK_ByCopy : LCK_ByRef;
 }
 
 LambdaExpr::LambdaExpr(QualType T, 

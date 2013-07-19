@@ -27,6 +27,7 @@
 #include "clang/AST/Stmt.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/AST/StmtObjC.h"
+#include "clang/AST/StmtOpenMP.h"
 #include "clang/AST/TemplateBase.h"
 #include "clang/AST/TemplateName.h"
 #include "clang/AST/Type.h"
@@ -404,6 +405,10 @@ private:
   bool TraverseDeclContextHelper(DeclContext *DC);
   bool TraverseFunctionHelper(FunctionDecl *D);
   bool TraverseVarHelper(VarDecl *D);
+  bool TraverseOMPClause(OMPClause *C);
+#define OPENMP_CLAUSE(Name, Class)                                      \
+  bool Visit##Class(Class *C);
+#include "clang/Basic/OpenMPKinds.def"
 
   typedef SmallVector<Stmt *, 16> StmtsTy;
   typedef SmallVector<StmtsTy *, 4> QueuesTy;
@@ -502,7 +507,7 @@ bool RecursiveASTVisitor<Derived>::TraverseStmt(Stmt *S) {
       }
     }
 
-    for (SmallVector<Stmt *, 8>::reverse_iterator
+    for (SmallVectorImpl<Stmt *>::reverse_iterator
            RI = StmtsToEnqueu.rbegin(),
            RE = StmtsToEnqueu.rend(); RI != RE; ++RI)
       Queue.push_back(*RI);
@@ -786,6 +791,10 @@ DEF_TRAVERSE_TYPE(MemberPointerType, {
     TRY_TO(TraverseType(T->getPointeeType()));
   })
 
+DEF_TRAVERSE_TYPE(DecayedType, {
+    TRY_TO(TraverseType(T->getOriginalType()));
+  })
+
 DEF_TRAVERSE_TYPE(ConstantArrayType, {
     TRY_TO(TraverseType(T->getElementType()));
   })
@@ -990,6 +999,10 @@ DEF_TRAVERSE_TYPELOC(RValueReferenceType, {
 DEF_TRAVERSE_TYPELOC(MemberPointerType, {
     TRY_TO(TraverseType(QualType(TL.getTypePtr()->getClass(), 0)));
     TRY_TO(TraverseTypeLoc(TL.getPointeeLoc()));
+  })
+
+DEF_TRAVERSE_TYPELOC(DecayedType, {
+    TRY_TO(TraverseTypeLoc(TL.getOriginalLoc()));
   })
 
 template<typename Derived>
@@ -2039,6 +2052,8 @@ DEF_TRAVERSE_STMT(CXXTemporaryObjectExpr, {
 // Walk only the visible parts of lambda expressions.  
 template<typename Derived>
 bool RecursiveASTVisitor<Derived>::TraverseLambdaExpr(LambdaExpr *S) {
+  TRY_TO(WalkUpFromLambdaExpr(S));
+
   for (LambdaExpr::capture_iterator C = S->explicit_capture_begin(),
                                  CEnd = S->explicit_capture_end();
        C != CEnd; ++C) {
@@ -2095,6 +2110,7 @@ DEF_TRAVERSE_STMT(CXXDefaultInitExpr, { })
 DEF_TRAVERSE_STMT(CXXDeleteExpr, { })
 DEF_TRAVERSE_STMT(ExprWithCleanups, { })
 DEF_TRAVERSE_STMT(CXXNullPtrLiteralExpr, { })
+DEF_TRAVERSE_STMT(CXXStdInitializerListExpr, { })
 DEF_TRAVERSE_STMT(CXXPseudoDestructorExpr, {
   TRY_TO(TraverseNestedNameSpecifierLoc(S->getQualifierLoc()));
   if (TypeSourceInfo *ScopeInfo = S->getScopeTypeInfo())
@@ -2190,6 +2206,47 @@ DEF_TRAVERSE_STMT(ObjCDictionaryLiteral, { })
   
 // Traverse OpenCL: AsType, Convert.
 DEF_TRAVERSE_STMT(AsTypeExpr, { })
+
+// OpenMP directives.
+DEF_TRAVERSE_STMT(OMPParallelDirective, {
+  ArrayRef<OMPClause *> Clauses = S->clauses();
+  for (ArrayRef<OMPClause *>::iterator I = Clauses.begin(), E = Clauses.end();
+       I != E; ++I)
+    if (!TraverseOMPClause(*I)) return false;
+})
+
+// OpenMP clauses.
+template<typename Derived>
+bool RecursiveASTVisitor<Derived>::TraverseOMPClause(OMPClause *C) {
+  if (!C) return true;
+  switch (C->getClauseKind()) {
+#define OPENMP_CLAUSE(Name, Class)                                      \
+  case OMPC_##Name:                                                     \
+    return getDerived().Visit##Class(static_cast<Class*>(C));
+#include "clang/Basic/OpenMPKinds.def"
+  default: break;
+  }
+  return true;
+}
+
+template<typename Derived>
+bool RecursiveASTVisitor<Derived>::VisitOMPDefaultClause(OMPDefaultClause *C) {
+  return true;
+}
+
+#define PROCESS_OMP_CLAUSE_LIST(Class, Node)                                   \
+  for (OMPVarList<Class>::varlist_iterator I = Node->varlist_begin(),          \
+                                           E = Node->varlist_end();            \
+         I != E; ++I)                                                          \
+    TraverseStmt(*I);
+
+template<typename Derived>
+bool RecursiveASTVisitor<Derived>::VisitOMPPrivateClause(OMPPrivateClause *C) {
+  PROCESS_OMP_CLAUSE_LIST(OMPPrivateClause, C)
+  return true;
+}
+
+#undef PROCESS_OMP_CLAUSE_LIST
 
 // FIXME: look at the following tricky-seeming exprs to see if we
 // need to recurse on anything.  These are ones that have methods

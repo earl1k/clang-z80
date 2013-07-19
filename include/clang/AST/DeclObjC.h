@@ -553,6 +553,9 @@ public:
 
   typedef llvm::DenseMap<IdentifierInfo*, ObjCPropertyDecl*> PropertyMap;
   
+  typedef llvm::DenseMap<const ObjCProtocolDecl *, ObjCPropertyDecl*>
+            ProtocolPropertyMap;
+  
   typedef llvm::SmallVector<ObjCPropertyDecl*, 8> PropertyDeclOrder;
   
   /// This routine collects list of properties to be implemented in the class.
@@ -1133,6 +1136,8 @@ public:
     return lookupInstanceVariable(IVarName, ClassDeclared);
   }
 
+  ObjCProtocolDecl *lookupNestedProtocol(IdentifierInfo *Name);
+                          
   // Lookup a method. First, we search locally. If a method isn't
   // found, we search referenced protocols and class categories.
   ObjCMethodDecl *lookupMethod(Selector Sel, bool isInstance,
@@ -1513,6 +1518,9 @@ public:
 
   virtual void collectPropertiesToImplement(PropertyMap &PM,
                                             PropertyDeclOrder &PO) const;
+                           
+void collectInheritedProtocolProperties(const ObjCPropertyDecl *Property,
+                                        ProtocolPropertyMap &PM) const;
 
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
   static bool classofKind(Kind K) { return K == ObjCProtocol; }
