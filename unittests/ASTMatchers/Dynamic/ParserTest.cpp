@@ -73,19 +73,19 @@ public:
     VariantValue Value;
     Parser::parseExpression(Code, this, &Value, &Error);
     Values.push_back(Value);
-    Errors.push_back(Error.ToStringFull());
+    Errors.push_back(Error.toStringFull());
   }
 
-  MatcherList actOnMatcherExpression(StringRef MatcherName,
-                                     const SourceRange &NameRange,
-                                     StringRef BindID,
-                                     ArrayRef<ParserValue> Args,
-                                     Diagnostics *Error) {
+  VariantMatcher actOnMatcherExpression(StringRef MatcherName,
+                                        const SourceRange &NameRange,
+                                        StringRef BindID,
+                                        ArrayRef<ParserValue> Args,
+                                        Diagnostics *Error) {
     MatcherInfo ToStore = { MatcherName, NameRange, Args, BindID };
     Matchers.push_back(ToStore);
     DummyDynTypedMatcher Matcher(ExpectedMatchers[MatcherName]);
     OwningPtr<DynTypedMatcher> Out(Matcher.tryBind(BindID));
-    return *Out;
+    return VariantMatcher::SingleMatcher(*Out);
   }
 
   struct MatcherInfo {
@@ -137,6 +137,12 @@ bool matchesRange(const SourceRange &Range, unsigned StartLine,
          Range.Start.Column == StartColumn && Range.End.Column == EndColumn;
 }
 
+const DynTypedMatcher *getSingleMatcher(const VariantValue &Value) {
+  const DynTypedMatcher *Out;
+  EXPECT_TRUE(Value.getMatcher().getSingleMatcher(Out));
+  return Out;
+}
+
 TEST(ParserTest, ParseMatcher) {
   MockSema Sema;
   const uint64_t ExpectedFoo = Sema.expectMatcher("Foo");
@@ -148,9 +154,9 @@ TEST(ParserTest, ParseMatcher) {
   }
 
   EXPECT_EQ(1ULL, Sema.Values.size());
-  EXPECT_EQ(ExpectedFoo, Sema.Values[0].getMatchers().matchers()[0]->getID());
+  EXPECT_EQ(ExpectedFoo, getSingleMatcher(Sema.Values[0])->getID());
   EXPECT_EQ("Yo!", static_cast<const DummyDynTypedMatcher *>(
-                       Sema.Values[0].getMatchers().matchers()[0])->boundID());
+                       getSingleMatcher(Sema.Values[0]))->boundID());
 
   EXPECT_EQ(3ULL, Sema.Matchers.size());
   const MockSema::MatcherInfo Bar = Sema.Matchers[0];
@@ -169,10 +175,8 @@ TEST(ParserTest, ParseMatcher) {
   EXPECT_EQ("Foo", Foo.MatcherName);
   EXPECT_TRUE(matchesRange(Foo.NameRange, 1, 2, 2, 12));
   EXPECT_EQ(2ULL, Foo.Args.size());
-  EXPECT_EQ(ExpectedBar,
-            Foo.Args[0].Value.getMatchers().matchers()[0]->getID());
-  EXPECT_EQ(ExpectedBaz,
-            Foo.Args[1].Value.getMatchers().matchers()[0]->getID());
+  EXPECT_EQ(ExpectedBar, getSingleMatcher(Foo.Args[0].Value)->getID());
+  EXPECT_EQ(ExpectedBaz, getSingleMatcher(Foo.Args[1].Value)->getID());
   EXPECT_EQ("Yo!", Foo.BoundID);
 }
 
@@ -184,7 +188,7 @@ TEST(ParserTest, FullParserTest) {
       "varDecl(hasInitializer(binaryOperator(hasLHS(integerLiteral()),"
       "                                      hasOperatorName(\"+\"))))",
       &Error));
-  EXPECT_EQ("", Error.ToStringFull());
+  EXPECT_EQ("", Error.toStringFull());
   Matcher<Decl> M = Matcher<Decl>::constructFrom(*VarDecl);
   EXPECT_TRUE(matches("int x = 1 + false;", M));
   EXPECT_FALSE(matches("int x = true + 1;", M));
@@ -193,7 +197,7 @@ TEST(ParserTest, FullParserTest) {
 
   OwningPtr<DynTypedMatcher> HasParameter(Parser::parseMatcherExpression(
       "functionDecl(hasParameter(1, hasName(\"x\")))", &Error));
-  EXPECT_EQ("", Error.ToStringFull());
+  EXPECT_EQ("", Error.toStringFull());
   M = Matcher<Decl>::constructFrom(*HasParameter);
 
   EXPECT_TRUE(matches("void f(int a, int x);", M));
@@ -206,20 +210,20 @@ TEST(ParserTest, FullParserTest) {
             "2:20: Error building matcher hasLHS.\n"
             "2:27: Incorrect type for arg 1. "
             "(Expected = Matcher<Expr>) != (Actual = String)",
-            Error.ToStringFull());
+            Error.toStringFull());
 }
 
 std::string ParseWithError(StringRef Code) {
   Diagnostics Error;
   VariantValue Value;
   Parser::parseExpression(Code, &Value, &Error);
-  return Error.ToStringFull();
+  return Error.toStringFull();
 }
 
 std::string ParseMatcherWithError(StringRef Code) {
   Diagnostics Error;
   Parser::parseMatcherExpression(Code, &Error);
-  return Error.ToStringFull();
+  return Error.toStringFull();
 }
 
 TEST(ParserTest, Errors) {
@@ -254,6 +258,15 @@ TEST(ParserTest, Errors) {
   EXPECT_EQ("Input value has unresolved overloaded type: "
             "Matcher<DoStmt|ForStmt|WhileStmt>",
             ParseMatcherWithError("hasBody(stmt())"));
+}
+
+TEST(ParserTest, OverloadErrors) {
+  EXPECT_EQ("1:1: Error building matcher callee.\n"
+            "1:8: Candidate 1: Incorrect type for arg 1. "
+            "(Expected = Matcher<Stmt>) != (Actual = String)\n"
+            "1:8: Candidate 2: Incorrect type for arg 1. "
+            "(Expected = Matcher<Decl>) != (Actual = String)",
+            ParseWithError("callee(\"A\")"));
 }
 
 }  // end anonymous namespace

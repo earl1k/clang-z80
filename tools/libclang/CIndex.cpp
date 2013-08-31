@@ -701,8 +701,9 @@ bool CursorVisitor::VisitClassTemplatePartialSpecializationDecl(
     return true;
 
   // Visit the partial specialization arguments.
-  const TemplateArgumentLoc *TemplateArgs = D->getTemplateArgsAsWritten();
-  for (unsigned I = 0, N = D->getNumTemplateArgsAsWritten(); I != N; ++I)
+  const ASTTemplateArgumentListInfo *Info = D->getTemplateArgsAsWritten();
+  const TemplateArgumentLoc *TemplateArgs = Info->getTemplateArgs();
+  for (unsigned I = 0, N = Info->NumTemplateArgs; I != N; ++I)
     if (VisitTemplateArgumentLoc(TemplateArgs[I]))
       return true;
   
@@ -2255,8 +2256,7 @@ bool CursorVisitor::IsInRegionOfInterest(CXCursor C) {
 bool CursorVisitor::RunVisitorWorkList(VisitorWorkList &WL) {
   while (!WL.empty()) {
     // Dequeue the worklist item.
-    VisitorJob LI = WL.back();
-    WL.pop_back();
+    VisitorJob LI = WL.pop_back_val();
 
     // Set the Parent field, then back to its old value once we're done.
     SetParentRAII SetParent(Parent, StmtParent, LI.getParent());
@@ -3057,15 +3057,12 @@ int clang_getFileUniqueID(CXFile file, CXFileUniqueID *outID) {
   if (!file || !outID)
     return 1;
 
-#ifdef LLVM_ON_WIN32
-  return 1; // inodes not supported on windows.
-#else
   FileEntry *FEnt = static_cast<FileEntry *>(file);
-  outID->data[0] = FEnt->getDevice();
-  outID->data[1] = FEnt->getInode();
+  const llvm::sys::fs::UniqueID &ID = FEnt->getUniqueID();
+  outID->data[0] = ID.getDevice();
+  outID->data[1] = ID.getFile();
   outID->data[2] = FEnt->getModificationTime();
   return 0;
-#endif
 }
 
 } // end: extern "C"
@@ -4585,7 +4582,9 @@ CXCursor clang_getCursorDefinition(CXCursor C) {
     return clang_getNullCursor();
   }
 
-  case Decl::Var: {
+  case Decl::Var:
+  case Decl::VarTemplateSpecialization:
+  case Decl::VarTemplatePartialSpecialization: {
     // Ask the variable if it has a definition.
     if (const VarDecl *Def = cast<VarDecl>(D)->getDefinition())
       return MakeCXCursor(Def, TU);
@@ -4604,6 +4603,13 @@ CXCursor clang_getCursorDefinition(CXCursor C) {
                                                             ->getDefinition())
       return MakeCXCursor(cast<CXXRecordDecl>(Def)->getDescribedClassTemplate(),
                           TU);
+    return clang_getNullCursor();
+  }
+
+  case Decl::VarTemplate: {
+    if (VarDecl *Def =
+            cast<VarTemplateDecl>(D)->getTemplatedDecl()->getDefinition())
+      return MakeCXCursor(cast<VarDecl>(Def)->getDescribedVarTemplate(), TU);
     return clang_getNullCursor();
   }
 

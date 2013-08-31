@@ -173,6 +173,10 @@ void Sema::Initialize() {
 }
 
 Sema::~Sema() {
+  for (LateParsedTemplateMapT::iterator I = LateParsedTemplateMap.begin(),
+                                        E = LateParsedTemplateMap.end();
+       I != E; ++I)
+    delete I->second;
   if (PackContext) FreePackedContext();
   if (VisContext) FreeVisContext();
   delete TheTargetAttributesSema;
@@ -283,9 +287,6 @@ ExprResult Sema::ImpCastExprToType(Expr *E, QualType Ty,
 
   if (ExprTy == TypeTy)
     return Owned(E);
-
-  if (getLangOpts().ObjCAutoRefCount)
-    CheckObjCARCConversion(SourceRange(), Ty, E, CCK);
 
   // If this is a derived-to-base cast to a through a virtual base, we
   // need a vtable.
@@ -551,9 +552,9 @@ void Sema::ActOnEndOfTranslationUnit() {
   if (PP.isCodeCompletionEnabled())
     return;
 
-  // Only complete translation units define vtables and perform implicit
-  // instantiations.
-  if (TUKind == TU_Complete) {
+  // Complete translation units and modules define vtables and perform implicit
+  // instantiations. PCH files do not.
+  if (TUKind != TU_Prefix) {
     DiagnoseUseOfUnimplementedSelectors();
 
     // If any dynamic classes have their key function defined within
@@ -582,10 +583,9 @@ void Sema::ActOnEndOfTranslationUnit() {
     // carefully keep track of the point of instantiation (C++ [temp.point]).
     // This means that name lookup that occurs within the template
     // instantiation will always happen at the end of the translation unit,
-    // so it will find some names that should not be found. Although this is
-    // common behavior for C++ compilers, it is technically wrong. In the
-    // future, we either need to be able to filter the results of name lookup
-    // or we need to perform template instantiations earlier.
+    // so it will find some names that are not required to be found. This is
+    // valid, but we could do better by diagnosing if an instantiation uses a
+    // name that was not visible at its first point of instantiation.
     PerformPendingInstantiations();
   }
 
@@ -630,8 +630,7 @@ void Sema::ActOnEndOfTranslationUnit() {
       SmallVector<Module *, 2> Stack;
       Stack.push_back(CurrentModule);
       while (!Stack.empty()) {
-        Module *Mod = Stack.back();
-        Stack.pop_back();
+        Module *Mod = Stack.pop_back_val();
 
         // Resolve the exported declarations and conflicts.
         // FIXME: Actually complain, once we figure out how to teach the
@@ -722,7 +721,7 @@ void Sema::ActOnEndOfTranslationUnit() {
           else {
             if (FD->getStorageClass() == SC_Static &&
                 !FD->isInlineSpecified() &&
-                !SourceMgr.isFromMainFile(
+                !SourceMgr.isInMainFile(
                    SourceMgr.getExpansionLoc(FD->getLocation())))
               Diag(DiagD->getLocation(), diag::warn_unneeded_static_internal_decl)
                 << DiagD->getDeclName();
@@ -743,7 +742,7 @@ void Sema::ActOnEndOfTranslationUnit() {
         if (DiagD->isReferenced()) {
           Diag(DiagD->getLocation(), diag::warn_unneeded_internal_decl)
                 << /*variable*/1 << DiagD->getDeclName();
-        } else if (getSourceManager().isFromMainFile(DiagD->getLocation())) {
+        } else if (SourceMgr.isInMainFile(DiagD->getLocation())) {
           // If the declaration is in a header which is included into multiple
           // TUs, it will declare one variable per TU, and one of the other
           // variables may be used. So, only warn if the declaration is in the
@@ -1306,8 +1305,7 @@ bool Sema::tryToRecoverWithCall(ExprResult &E, const PartialDiagnostic &PD,
     // arguments and that it returns something of a reasonable type,
     // so we can emit a fixit and carry on pretending that E was
     // actually a CallExpr.
-    SourceLocation ParenInsertionLoc =
-      PP.getLocForEndOfToken(Range.getEnd());
+    SourceLocation ParenInsertionLoc = PP.getLocForEndOfToken(Range.getEnd());
     Diag(Loc, PD)
       << /*zero-arg*/ 1 << Range
       << (IsCallableWithAppend(E.get())
@@ -1317,8 +1315,8 @@ bool Sema::tryToRecoverWithCall(ExprResult &E, const PartialDiagnostic &PD,
 
     // FIXME: Try this before emitting the fixit, and suppress diagnostics
     // while doing so.
-    E = ActOnCallExpr(0, E.take(), ParenInsertionLoc,
-                      None, ParenInsertionLoc.getLocWithOffset(1));
+    E = ActOnCallExpr(0, E.take(), Range.getEnd(), None,
+                      Range.getEnd().getLocWithOffset(1));
     return true;
   }
 

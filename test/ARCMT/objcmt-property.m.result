@@ -1,8 +1,9 @@
 // RUN: rm -rf %t
-// RUN: %clang_cc1 -objcmt-migrate-property -mt-migrate-directory %t %s -x objective-c -fobjc-runtime-has-weak -fobjc-arc -fobjc-default-synthesize-properties -triple x86_64-apple-darwin11
+// RUN: %clang_cc1 -objcmt-migrate-property -objcmt-migrate-readonly-property -mt-migrate-directory %t %s -x objective-c -fobjc-runtime-has-weak -fobjc-arc -fobjc-default-synthesize-properties -triple x86_64-apple-darwin11
 // RUN: c-arcmt-test -mt-migrate-directory %t | arcmt-test -verify-transformed-files %s.result
 // RUN: %clang_cc1 -triple x86_64-apple-darwin10 -fsyntax-only -x objective-c -fobjc-runtime-has-weak -fobjc-arc -fobjc-default-synthesize-properties %s.result
 
+typedef char BOOL;
 @class NSString;
 @protocol NSCopying @end
 
@@ -16,9 +17,9 @@
   int ivarVal;
 }
 
-@property(weak) NSString * WeakProp;
+@property(nonatomic, weak) NSString * WeakProp;
 
-@property NSString * StrongProp;
+@property(nonatomic, retain) NSString * StrongProp;
 
 
 - (NSString *) UnavailProp  __attribute__((unavailable));
@@ -30,7 +31,7 @@
 - (NSString *) UnavailProp2;
 - (void) setUnavailProp2  : (NSString *)Val  __attribute__((unavailable));
 
-@property(copy) NSDictionary * undoAction;
+@property(nonatomic, copy) NSDictionary * undoAction;
 
 @end
 
@@ -50,8 +51,45 @@
 
 
 
-@property NSArray * names2;
-@property NSArray * names3;
-@property NSArray * names4;
-@property NSArray * names1;
+@property(nonatomic, retain) NSArray * names2;
+@property(nonatomic, retain) NSArray * names3;
+@property(nonatomic, retain) NSArray * names4;
+@property(nonatomic, retain) NSArray * names1;
+@end
+
+// Properties that contain the name "delegate" or "dataSource",
+// or have exact name "target" have unsafe_unretained attribute.
+@interface NSInvocation 
+@property(nonatomic, unsafe_unretained) id target;
+
+
+@property(nonatomic, unsafe_unretained) id dataSource;
+
+@property(nonatomic, unsafe_unretained) id xxxdelegateYYY;
+
+
+
+
+@property(nonatomic, retain) id MYtarget;
+
+
+@property(nonatomic, retain) id targetX;
+
+ 
+@property(nonatomic) int value;
+
+
+@property(nonatomic, getter=isContinuous) BOOL continuous;
+
+
+@property(nonatomic, readonly) id isAnObject;
+- (void)setAnObject : (id) object;
+
+@property(nonatomic, readonly) BOOL isinValid;
+- (void) setInValid : (BOOL) arg;
+
+- (void) Nothing;
+@property(nonatomic, readonly) int Length;
+@property(nonatomic, readonly) id object;
++ (double) D;
 @end

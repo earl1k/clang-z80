@@ -835,6 +835,7 @@ void ASTStmtReader::VisitChooseExpr(ChooseExpr *E) {
   E->setRHS(Reader.ReadSubExpr());
   E->setBuiltinLoc(ReadSourceLocation(Record, Idx));
   E->setRParenLoc(ReadSourceLocation(Record, Idx));
+  E->setIsConditionTrue(Record[Idx++]);
 }
 
 void ASTStmtReader::VisitGNUNullExpr(GNUNullExpr *E) {
@@ -1206,6 +1207,7 @@ void ASTStmtReader::VisitLambdaExpr(LambdaExpr *E) {
   unsigned NumArrayIndexVars = Record[Idx++];
   E->IntroducerRange = ReadSourceRange(Record, Idx);
   E->CaptureDefault = static_cast<LambdaCaptureDefault>(Record[Idx++]);
+  E->CaptureDefaultLoc = ReadSourceLocation(Record, Idx);
   E->ExplicitParams = Record[Idx++];
   E->ExplicitResultType = Record[Idx++];
   E->ClosingBrace = ReadSourceLocation(Record, Idx);
@@ -1261,7 +1263,7 @@ void ASTStmtReader::VisitCXXConstCastExpr(CXXConstCastExpr *E) {
 
 void ASTStmtReader::VisitCXXFunctionalCastExpr(CXXFunctionalCastExpr *E) {
   VisitExplicitCastExpr(E);
-  E->setTypeBeginLoc(ReadSourceLocation(Record, Idx));
+  E->setLParenLoc(ReadSourceLocation(Record, Idx));
   E->setRParenLoc(ReadSourceLocation(Record, Idx));
 }
 
@@ -1738,6 +1740,8 @@ void ASTStmtReader::VisitOMPParallelDirective(OMPParallelDirective *D) {
 
 Stmt *ASTReader::ReadStmt(ModuleFile &F) {
   switch (ReadingKind) {
+  case Read_None:
+    llvm_unreachable("should not call this when not reading anything");
   case Read_Decl:
   case Read_Type:
     return ReadStmtFromStream(F);

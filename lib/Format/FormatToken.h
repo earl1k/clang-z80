@@ -17,7 +17,9 @@
 #define LLVM_CLANG_FORMAT_FORMAT_TOKEN_H
 
 #include "clang/Basic/OperatorPrecedence.h"
+#include "clang/Format/Format.h"
 #include "clang/Lex/Lexer.h"
+#include "llvm/ADT/OwningPtr.h"
 
 namespace clang {
 namespace format {
@@ -28,6 +30,7 @@ enum TokenType {
   TT_CastRParen,
   TT_ConditionalExpr,
   TT_CtorInitializerColon,
+  TT_CtorInitializerComma,
   TT_DesignatedInitializerPeriod,
   TT_ImplicitStringLiteral,
   TT_InlineASMColon,
@@ -71,18 +74,20 @@ enum ParameterPackingKind {
   PPK_Inconclusive
 };
 
+class TokenRole;
+
 /// \brief A wrapper around a \c Token storing information about the
 /// whitespace characters preceeding it.
 struct FormatToken {
   FormatToken()
-      : NewlinesBefore(0), HasUnescapedNewline(false), LastNewlineOffset(0),
-        CodePointCount(0), IsFirst(false), MustBreakBefore(false),
-        IsUnterminatedLiteral(false), BlockKind(BK_Unknown), Type(TT_Unknown),
-        SpacesRequiredBefore(0), CanBreakBefore(false),
-        ClosesTemplateDeclaration(false), ParameterCount(0),
-        PackingKind(PPK_Inconclusive), TotalLength(0), UnbreakableTailLength(0),
-        BindingStrength(0), SplitPenalty(0), LongestObjCSelectorName(0),
-        FakeRParens(0), LastInChainOfCalls(false),
+      : NewlinesBefore(0), HasUnescapedNewline(false), IsMultiline(false),
+        LastNewlineOffset(0), CodePointCount(0), IsFirst(false),
+        MustBreakBefore(false), IsUnterminatedLiteral(false),
+        BlockKind(BK_Unknown), Type(TT_Unknown), SpacesRequiredBefore(0),
+        CanBreakBefore(false), ClosesTemplateDeclaration(false),
+        ParameterCount(0), PackingKind(PPK_Inconclusive), TotalLength(0),
+        UnbreakableTailLength(0), BindingStrength(0), SplitPenalty(0),
+        LongestObjCSelectorName(0), FakeRParens(0), LastInChainOfCalls(false),
         PartOfMultiVariableDeclStmt(false), MatchingParen(NULL), Previous(NULL),
         Next(NULL) {}
 
@@ -98,6 +103,9 @@ struct FormatToken {
   /// \brief Whether there is at least one unescaped newline before the \c
   /// Token.
   bool HasUnescapedNewline;
+
+  /// \brief Whether the token text contains newlines (escaped or not).
+  bool IsMultiline;
 
   /// \brief The range of the whitespace immediately preceeding the \c Token.
   SourceRange WhitespaceRange;
@@ -142,7 +150,10 @@ struct FormatToken {
 
   TokenType Type;
 
+  /// \brief The number of spaces that should be inserted before this token.
   unsigned SpacesRequiredBefore;
+
+  /// \brief \c true if it is allowed to break before this token.
   bool CanBreakBefore;
 
   bool ClosesTemplateDeclaration;
@@ -154,11 +165,24 @@ struct FormatToken {
   /// the number of commas.
   unsigned ParameterCount;
 
+  /// \brief A token can have a special role that can carry extra information
+  /// about the token's formatting.
+  llvm::OwningPtr<TokenRole> Role;
+
   /// \brief If this is an opening parenthesis, how are the parameters packed?
   ParameterPackingKind PackingKind;
 
-  /// \brief The total length of the line up to and including this token.
+  /// \brief The total length of the unwrapped line up to and including this
+  /// token.
   unsigned TotalLength;
+
+  /// \brief The original column of this token, including expanded tabs.
+  /// The configured IndentWidth is used as tab width. Only tabs in whitespace
+  /// are expanded.
+  /// FIXME: This is currently only used on the first token of an unwrapped
+  /// line, and the implementation is not correct for other tokens (see the
+  /// FIXMEs in FormatTokenLexer::getNextToken()).
+  unsigned OriginalColumn;
 
   /// \brief The length of following tokens until the next natural split point,
   /// or the next token that can be broken.
@@ -245,6 +269,12 @@ struct FormatToken {
            Type == TT_TemplateCloser;
   }
 
+  /// \brief Returns \c true if this is a "." or "->" accessing a member.
+  bool isMemberAccess() const {
+    return isOneOf(tok::arrow, tok::period) &&
+           Type != TT_DesignatedInitializerPeriod;
+  }
+
   bool isUnaryOperator() const {
     switch (Tok.getKind()) {
     case tok::plus:
@@ -260,10 +290,12 @@ struct FormatToken {
       return false;
     }
   }
+
   bool isBinaryOperator() const {
     // Comma is a binary operator, but does not behave as such wrt. formatting.
     return getPrecedence() > prec::Comma;
   }
+
   bool isTrailingComment() const {
     return is(tok::comment) && (!Next || Next->NewlinesBefore > 0);
   }
@@ -297,6 +329,78 @@ private:
   // Disallow copying.
   FormatToken(const FormatToken &) LLVM_DELETED_FUNCTION;
   void operator=(const FormatToken &) LLVM_DELETED_FUNCTION;
+};
+
+class ContinuationIndenter;
+struct LineState;
+
+class TokenRole {
+public:
+  TokenRole(const FormatStyle &Style) : Style(Style) {}
+  virtual ~TokenRole();
+
+  /// \brief After the \c TokenAnnotator has finished annotating all the tokens,
+  /// this function precomputes required information for formatting.
+  virtual void precomputeFormattingInfos(const FormatToken *Token);
+
+  /// \brief Apply the special formatting that the given role demands.
+  ///
+  /// Continues formatting from \p State leaving indentation to \p Indenter and
+  /// returns the total penalty that this formatting incurs.
+  virtual unsigned format(LineState &State, ContinuationIndenter *Indenter,
+                          bool DryRun) {
+    return 0;
+  }
+
+  /// \brief Notifies the \c Role that a comma was found.
+  virtual void CommaFound(const FormatToken *Token) {}
+
+protected:
+  const FormatStyle &Style;
+};
+
+class CommaSeparatedList : public TokenRole {
+public:
+  CommaSeparatedList(const FormatStyle &Style) : TokenRole(Style) {}
+
+  virtual void precomputeFormattingInfos(const FormatToken *Token);
+
+  virtual unsigned format(LineState &State, ContinuationIndenter *Indenter,
+                          bool DryRun);
+
+  /// \brief Adds \p Token as the next comma to the \c CommaSeparated list.
+  virtual void CommaFound(const FormatToken *Token) { Commas.push_back(Token); }
+
+private:
+  /// \brief A struct that holds information on how to format a given list with
+  /// a specific number of columns.
+  struct ColumnFormat {
+    /// \brief The number of columns to use.
+    unsigned Columns;
+
+    /// \brief The total width in characters.
+    unsigned TotalWidth;
+
+    /// \brief The number of lines required for this format.
+    unsigned LineCount;
+
+    /// \brief The size of each column in characters.
+    SmallVector<unsigned, 8> ColumnSizes;
+  };
+
+  /// \brief Calculate which \c ColumnFormat fits best into
+  /// \p RemainingCharacters.
+  const ColumnFormat *getColumnFormat(unsigned RemainingCharacters) const;
+
+  /// \brief The ordered \c FormatTokens making up the commas of this list.
+  SmallVector<const FormatToken *, 8> Commas;
+
+  /// \brief The length of each of the list's items in characters including the
+  /// trailing comma.
+  SmallVector<unsigned, 8> ItemLengths;
+
+  /// \brief Precomputed formats that can be used for this list.
+  SmallVector<ColumnFormat, 4> Formats;
 };
 
 } // namespace format

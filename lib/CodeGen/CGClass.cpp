@@ -563,7 +563,7 @@ static void EmitMemberInitializer(CodeGenFunction &CGF,
   // in the AST, we could generalize it more easily.
   const ConstantArrayType *Array
     = CGF.getContext().getAsConstantArrayType(FieldType);
-  if (Array && Constructor->isImplicitlyDefined() &&
+  if (Array && Constructor->isDefaulted() &&
       Constructor->isCopyOrMoveConstructor()) {
     QualType BaseElementTy = CGF.getContext().getBaseElementType(Array);
     CXXConstructExpr *CE = dyn_cast<CXXConstructExpr>(MemberInit->getInit());
@@ -885,7 +885,7 @@ namespace {
     /// constructor. 
     static const VarDecl* getTrivialCopySource(const CXXConstructorDecl *CD,
                                                FunctionArgList &Args) {
-      if (CD->isCopyOrMoveConstructor() && CD->isImplicitlyDefined())
+      if (CD->isCopyOrMoveConstructor() && CD->isDefaulted())
         return Args[Args.size() - 1];
       return 0; 
     }
@@ -919,7 +919,7 @@ namespace {
                           FunctionArgList &Args)
       : FieldMemcpyizer(CGF, CD->getParent(), getTrivialCopySource(CD, Args)),
         ConstructorDecl(CD),
-        MemcpyableCtor(CD->isImplicitlyDefined() &&
+        MemcpyableCtor(CD->isDefaulted() &&
                        CD->isCopyOrMoveConstructor() &&
                        CGF.getLangOpts().getGC() == LangOptions::NonGC),
         Args(Args) { }
@@ -1265,16 +1265,19 @@ void CodeGenFunction::EmitDestructorBody(FunctionArgList &Args) {
   // If this is the complete variant, just invoke the base variant;
   // the epilogue will destruct the virtual bases.  But we can't do
   // this optimization if the body is a function-try-block, because
-  // we'd introduce *two* handler blocks.
+  // we'd introduce *two* handler blocks.  In the Microsoft ABI, we 
+  // always delegate because we might not have a definition in this TU.
   switch (DtorType) {
   case Dtor_Deleting: llvm_unreachable("already handled deleting case");
 
   case Dtor_Complete:
+    assert((Body || getTarget().getCXXABI().isMicrosoft()) &&
+           "can't emit a dtor without a body for non-Microsoft ABIs");
+
     // Enter the cleanup scopes for virtual bases.
     EnterDtorCleanups(Dtor, Dtor_Complete);
 
-    if (!isTryBody &&
-        CGM.getTarget().getCXXABI().hasDestructorVariants()) {
+    if (!isTryBody) {
       EmitCXXDestructorCall(Dtor, Dtor_Base, /*ForVirtualBase=*/false,
                             /*Delegating=*/false, LoadCXXThis());
       break;
@@ -1282,6 +1285,8 @@ void CodeGenFunction::EmitDestructorBody(FunctionArgList &Args) {
     // Fallthrough: act like we're in the base variant.
       
   case Dtor_Base:
+    assert(Body);
+
     // Enter the cleanup scopes for fields and non-virtual bases.
     EnterDtorCleanups(Dtor, Dtor_Base);
 
@@ -1847,7 +1852,6 @@ void
 CodeGenFunction::InitializeVTablePointer(BaseSubobject Base, 
                                          const CXXRecordDecl *NearestVBase,
                                          CharUnits OffsetFromNearestVBase,
-                                         llvm::Constant *VTable,
                                          const CXXRecordDecl *VTableClass) {
   const CXXRecordDecl *RD = Base.getBase();
 
@@ -1870,6 +1874,7 @@ CodeGenFunction::InitializeVTablePointer(BaseSubobject Base,
     // And load the address point from the VTT.
     VTableAddressPoint = Builder.CreateLoad(VTT);
   } else {
+    llvm::Constant *VTable = CGM.getVTables().GetAddrOfVTable(VTableClass);
     uint64_t AddressPoint =
       CGM.getVTableContext().getVTableLayout(VTableClass).getAddressPoint(Base);
     VTableAddressPoint =
@@ -1914,7 +1919,6 @@ CodeGenFunction::InitializeVTablePointers(BaseSubobject Base,
                                           const CXXRecordDecl *NearestVBase,
                                           CharUnits OffsetFromNearestVBase,
                                           bool BaseIsNonVirtualPrimaryBase,
-                                          llvm::Constant *VTable,
                                           const CXXRecordDecl *VTableClass,
                                           VisitedVirtualBasesSetTy& VBases) {
   // If this base is a non-virtual primary base the address point has already
@@ -1922,7 +1926,7 @@ CodeGenFunction::InitializeVTablePointers(BaseSubobject Base,
   if (!BaseIsNonVirtualPrimaryBase) {
     // Initialize the vtable pointer for this base.
     InitializeVTablePointer(Base, NearestVBase, OffsetFromNearestVBase,
-                            VTable, VTableClass);
+                            VTableClass);
   }
   
   const CXXRecordDecl *RD = Base.getBase();
@@ -1965,7 +1969,7 @@ CodeGenFunction::InitializeVTablePointers(BaseSubobject Base,
                              I->isVirtual() ? BaseDecl : NearestVBase,
                              BaseOffsetFromNearestVBase,
                              BaseDeclIsNonVirtualPrimaryBase, 
-                             VTable, VTableClass, VBases);
+                             VTableClass, VBases);
   }
 }
 
@@ -1974,16 +1978,12 @@ void CodeGenFunction::InitializeVTablePointers(const CXXRecordDecl *RD) {
   if (!RD->isDynamicClass())
     return;
 
-  // Get the VTable.
-  llvm::Constant *VTable = CGM.getVTables().GetAddrOfVTable(RD);
-
   // Initialize the vtable pointers for this class and all of its bases.
   VisitedVirtualBasesSetTy VBases;
   InitializeVTablePointers(BaseSubobject(RD, CharUnits::Zero()), 
                            /*NearestVBase=*/0, 
                            /*OffsetFromNearestVBase=*/CharUnits::Zero(),
-                           /*BaseIsNonVirtualPrimaryBase=*/false, 
-                           VTable, RD, VBases);
+                           /*BaseIsNonVirtualPrimaryBase=*/false, RD, VBases);
 }
 
 llvm::Value *CodeGenFunction::GetVTablePtr(llvm::Value *This,
@@ -1994,29 +1994,6 @@ llvm::Value *CodeGenFunction::GetVTablePtr(llvm::Value *This,
   return VTable;
 }
 
-static const CXXRecordDecl *getMostDerivedClassDecl(const Expr *Base) {
-  const Expr *E = Base;
-  
-  while (true) {
-    E = E->IgnoreParens();
-    if (const CastExpr *CE = dyn_cast<CastExpr>(E)) {
-      if (CE->getCastKind() == CK_DerivedToBase || 
-          CE->getCastKind() == CK_UncheckedDerivedToBase ||
-          CE->getCastKind() == CK_NoOp) {
-        E = CE->getSubExpr();
-        continue;
-      }
-    }
-
-    break;
-  }
-
-  QualType DerivedType = E->getType();
-  if (const PointerType *PTy = DerivedType->getAs<PointerType>())
-    DerivedType = PTy->getPointeeType();
-
-  return cast<CXXRecordDecl>(DerivedType->castAs<RecordType>()->getDecl());
-}
 
 // FIXME: Ideally Expr::IgnoreParenNoopCasts should do this, but it doesn't do
 // quite what we want.
@@ -2043,10 +2020,14 @@ static const Expr *skipNoOpCastsAndParens(const Expr *E) {
   }
 }
 
-/// canDevirtualizeMemberFunctionCall - Checks whether the given virtual member
-/// function call on the given expr can be devirtualized.
-static bool canDevirtualizeMemberFunctionCall(const Expr *Base, 
-                                              const CXXMethodDecl *MD) {
+bool
+CodeGenFunction::CanDevirtualizeMemberFunctionCall(const Expr *Base,
+                                                   const CXXMethodDecl *MD) {
+  // When building with -fapple-kext, all calls must go through the vtable since
+  // the kernel linker can do runtime patching of vtables.
+  if (getLangOpts().AppleKext)
+    return false;
+
   // If the most derived class is marked final, we know that no subclass can
   // override this member function and so we can devirtualize it. For example:
   //
@@ -2057,7 +2038,7 @@ static bool canDevirtualizeMemberFunctionCall(const Expr *Base,
   //   b->f();
   // }
   //
-  const CXXRecordDecl *MostDerivedClassDecl = getMostDerivedClassDecl(Base);
+  const CXXRecordDecl *MostDerivedClassDecl = Base->getBestDynamicClassType();
   if (MostDerivedClassDecl->hasAttr<FinalAttr>())
     return true;
 
@@ -2080,7 +2061,14 @@ static bool canDevirtualizeMemberFunctionCall(const Expr *Base,
     
     return false;
   }
-  
+
+  // We can devirtualize calls on an object accessed by a class member access
+  // expression, since by C++11 [basic.life]p6 we know that it can't refer to
+  // a derived class object constructed in the same location.
+  if (const MemberExpr *ME = dyn_cast<MemberExpr>(Base))
+    if (const ValueDecl *VD = dyn_cast<ValueDecl>(ME->getMemberDecl()))
+      return VD->getType()->isRecordType();
+
   // We can always devirtualize calls on temporary object expressions.
   if (isa<CXXConstructExpr>(Base))
     return true;
@@ -2097,20 +2085,6 @@ static bool canDevirtualizeMemberFunctionCall(const Expr *Base,
   return false;
 }
 
-static bool UseVirtualCall(ASTContext &Context,
-                           const CXXOperatorCallExpr *CE,
-                           const CXXMethodDecl *MD) {
-  if (!MD->isVirtual())
-    return false;
-  
-  // When building with -fapple-kext, all calls must go through the vtable since
-  // the kernel linker can do runtime patching of vtables.
-  if (Context.getLangOpts().AppleKext)
-    return true;
-
-  return !canDevirtualizeMemberFunctionCall(CE->getArg(0), MD);
-}
-
 llvm::Value *
 CodeGenFunction::EmitCXXOperatorMemberCallee(const CXXOperatorCallExpr *E,
                                              const CXXMethodDecl *MD,
@@ -2119,8 +2093,8 @@ CodeGenFunction::EmitCXXOperatorMemberCallee(const CXXOperatorCallExpr *E,
     CGM.getTypes().GetFunctionType(
                              CGM.getTypes().arrangeCXXMethodDeclaration(MD));
 
-  if (UseVirtualCall(getContext(), E, MD))
-    return BuildVirtualCall(MD, This, fnType);
+  if (MD->isVirtual() && !CanDevirtualizeMemberFunctionCall(E->getArg(0), MD))
+    return CGM.getCXXABI().getVirtualFunctionPointer(*this, MD, This, fnType);
 
   return CGM.GetAddrOfFunction(MD, fnType);
 }

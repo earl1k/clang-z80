@@ -23,6 +23,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace clang {
 namespace ast_matchers {
@@ -64,6 +65,7 @@ public:
     ET_RegistryWrongArgCount = 2,
     ET_RegistryWrongArgType = 3,
     ET_RegistryNotBindable = 4,
+    ET_RegistryAmbiguousOverload = 5,
 
     ET_ParserStringError = 100,
     ET_ParserNoOpenParen = 101,
@@ -113,6 +115,23 @@ public:
     Diagnostics *const Error;
   };
 
+  /// \brief Context for overloaded matcher construction.
+  ///
+  /// This context will take care of merging all errors that happen within it
+  /// as "candidate" overloads for the same matcher.
+  struct OverloadContext {
+  public:
+   OverloadContext(Diagnostics* Error);
+   ~OverloadContext();
+
+   /// \brief Revert all errors that happened within this context.
+   void revertErrors();
+
+  private:
+    Diagnostics *const Error;
+    unsigned BeginIndex;
+  };
+
   /// \brief Add an error to the diagnostics.
   ///
   /// All the context information will be kept on the error message.
@@ -125,30 +144,31 @@ public:
     ContextType Type;
     SourceRange Range;
     std::vector<std::string> Args;
-
-    std::string ToString() const;
   };
 
   /// \brief Information stored for each error found.
   struct ErrorContent {
     std::vector<ContextFrame> ContextStack;
-    SourceRange Range;
-    ErrorType Type;
-    std::vector<std::string> Args;
-
-    std::string ToString() const;
+    struct Message {
+      SourceRange Range;
+      ErrorType Type;
+      std::vector<std::string> Args;
+    };
+    std::vector<Message> Messages;
   };
   ArrayRef<ErrorContent> errors() const { return Errors; }
 
   /// \brief Returns a simple string representation of each error.
   ///
   /// Each error only shows the error message without any context.
-  std::string ToString() const;
+  void printToStream(llvm::raw_ostream &OS) const;
+  std::string toString() const;
 
   /// \brief Returns the full string representation of each error.
   ///
   /// Each error message contains the full context.
-  std::string ToStringFull() const;
+  void printToStreamFull(llvm::raw_ostream &OS) const;
+  std::string toStringFull() const;
 
 private:
   /// \brief Helper function used by the constructors of ContextFrame.

@@ -209,7 +209,18 @@ ExprEngine::createTemporaryRegionIfNeeded(ProgramStateRef State,
 
   // Create a temporary object region for the inner expression (which may have
   // a more derived type) and bind the value into it.
-  const TypedValueRegion *TR = MRMgr.getCXXTempObjectRegion(Inner, LC);
+  const TypedValueRegion *TR = NULL;
+  if (const MaterializeTemporaryExpr *MT =
+          dyn_cast<MaterializeTemporaryExpr>(Result)) {
+    StorageDuration SD = MT->getStorageDuration();
+    // If this object is bound to a reference with static storage duration, we
+    // put it in a different region to prevent "address leakage" warnings.
+    if (SD == SD_Static || SD == SD_Thread)
+        TR = MRMgr.getCXXStaticTempObjectRegion(Inner);
+  }
+  if (!TR)
+    TR = MRMgr.getCXXTempObjectRegion(Inner, LC);
+
   SVal Reg = loc::MemRegionVal(TR);
 
   if (V.isUnknown())
@@ -590,15 +601,7 @@ void ExprEngine::ProcessMemberDtor(const CFGMemberDtor D,
 
 void ExprEngine::ProcessTemporaryDtor(const CFGTemporaryDtor D,
                                       ExplodedNode *Pred,
-                                      ExplodedNodeSet &Dst) {
-
-  QualType varType = D.getBindTemporaryExpr()->getSubExpr()->getType();
-
-  // FIXME: Inlining of temporary destructors is not supported yet anyway, so we
-  // just put a NULL region for now. This will need to be changed later.
-  VisitCXXDestructor(varType, NULL, D.getBindTemporaryExpr(),
-                     /*IsBase=*/ false, Pred, Dst);
-}
+                                      ExplodedNodeSet &Dst) {}
 
 void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
                        ExplodedNodeSet &DstTop) {
@@ -614,7 +617,6 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     // C++ and ARC stuff we don't support yet.
     case Expr::ObjCIndirectCopyRestoreExprClass:
     case Stmt::CXXDependentScopeMemberExprClass:
-    case Stmt::CXXPseudoDestructorExprClass:
     case Stmt::CXXTryStmtClass:
     case Stmt::CXXTypeidExprClass:
     case Stmt::CXXUuidofExprClass:
@@ -728,6 +730,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::StringLiteralClass:
     case Stmt::ObjCStringLiteralClass:
     case Stmt::CXXBindTemporaryExprClass:
+    case Stmt::CXXPseudoDestructorExprClass:
     case Stmt::SubstNonTypeTemplateParmExprClass:
     case Stmt::CXXNullPtrLiteralExprClass: {
       Bldr.takeNodes(Pred);
@@ -1340,12 +1343,24 @@ void ExprEngine::processBranch(const Stmt *Condition, const Stmt *Term,
     return;
   }
 
+  SValBuilder &SVB = Pred->getState()->getStateManager().getSValBuilder();
+  SVal TrueVal = SVB.makeTruthVal(true);
+  SVal FalseVal = SVB.makeTruthVal(false);
 
   // Resolve the condition in the precense of nested '||' and '&&'.
   if (const Expr *Ex = dyn_cast<Expr>(Condition))
     Condition = Ex->IgnoreParens();
-
   Condition = ResolveCondition(Condition, BldCtx.getBlock());
+
+  // Cast truth values to the correct type.
+  if (const Expr *Ex = dyn_cast<Expr>(Condition)) {
+    TrueVal = SVB.evalCast(TrueVal, Ex->getType(),
+                           getContext().getLogicalOperationType());
+    FalseVal = SVB.evalCast(FalseVal, Ex->getType(),
+                            getContext().getLogicalOperationType());
+  }
+
+
   PrettyStackTraceLoc CrashInfo(getContext().getSourceManager(),
                                 Condition->getLocStart(),
                                 "Error evaluating branch");
@@ -1388,31 +1403,37 @@ void ExprEngine::processBranch(const Stmt *Condition, const Stmt *Term,
       }
     }
     
+    ProgramStateRef StTrue, StFalse;
+
     // If the condition is still unknown, give up.
     if (X.isUnknownOrUndef()) {
-      builder.generateNode(PrevState, true, PredI);
-      builder.generateNode(PrevState, false, PredI);
+
+      StTrue = PrevState->BindExpr(Condition, BldCtx.LC, TrueVal);
+      StFalse = PrevState->BindExpr(Condition, BldCtx.LC, FalseVal);
+
+      builder.generateNode(StTrue, true, PredI);
+      builder.generateNode(StFalse, false, PredI);
       continue;
     }
 
     DefinedSVal V = X.castAs<DefinedSVal>();
-
-    ProgramStateRef StTrue, StFalse;
     tie(StTrue, StFalse) = PrevState->assume(V);
 
     // Process the true branch.
     if (builder.isFeasible(true)) {
-      if (StTrue)
+      if (StTrue) {
+        StTrue = StTrue->BindExpr(Condition, BldCtx.LC, TrueVal);
         builder.generateNode(StTrue, true, PredI);
-      else
+      } else
         builder.markInfeasible(true);
     }
 
     // Process the false branch.
     if (builder.isFeasible(false)) {
-      if (StFalse)
+      if (StFalse) {
+        StFalse = StFalse->BindExpr(Condition, BldCtx.LC, FalseVal);
         builder.generateNode(StFalse, false, PredI);
-      else
+      } else
         builder.markInfeasible(false);
     }
   }

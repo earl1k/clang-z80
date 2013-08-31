@@ -535,7 +535,10 @@ namespace clang {
 
       /// \brief Record code for undefined but used functions and variables that
       /// need a definition in this TU.
-      UNDEFINED_BUT_USED = 49
+      UNDEFINED_BUT_USED = 49,
+
+      /// \brief Record code for late parsed template functions.
+      LATE_PARSED_TEMPLATE = 50
     };
 
     /// \brief Record types used within a source manager block.
@@ -1027,6 +1030,12 @@ namespace clang {
       DECL_CLASS_TEMPLATE_SPECIALIZATION,
       /// \brief A ClassTemplatePartialSpecializationDecl record.
       DECL_CLASS_TEMPLATE_PARTIAL_SPECIALIZATION,
+      /// \brief A VarTemplateDecl record.
+      DECL_VAR_TEMPLATE,
+      /// \brief A VarTemplateSpecializationDecl record.
+      DECL_VAR_TEMPLATE_SPECIALIZATION,
+      /// \brief A VarTemplatePartialSpecializationDecl record.
+      DECL_VAR_TEMPLATE_PARTIAL_SPECIALIZATION,
       /// \brief A FunctionTemplateDecl record.
       DECL_FUNCTION_TEMPLATE,
       /// \brief A TemplateTypeParmDecl record.

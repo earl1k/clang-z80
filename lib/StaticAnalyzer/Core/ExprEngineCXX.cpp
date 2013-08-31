@@ -30,21 +30,7 @@ void ExprEngine::CreateCXXTemporaryObject(const MaterializeTemporaryExpr *ME,
   ProgramStateRef state = Pred->getState();
   const LocationContext *LCtx = Pred->getLocationContext();
 
-  SVal V = state->getSVal(tempExpr, LCtx);
-
-  // If the value is already a CXXTempObjectRegion, it is fine as it is.
-  // Otherwise, create a new CXXTempObjectRegion, and copy the value into it.
-  // This is an optimization for when an rvalue is constructed and then
-  // immediately materialized.
-  const MemRegion *MR = V.getAsRegion();
-  if (const CXXTempObjectRegion *TR =
-        dyn_cast_or_null<CXXTempObjectRegion>(MR)) {
-    if (getContext().hasSameUnqualifiedType(TR->getValueType(), ME->getType()))
-      state = state->BindExpr(ME, LCtx, V);
-  }
-
-  if (state == Pred->getState())
-    state = createTemporaryRegionIfNeeded(state, LCtx, tempExpr, ME);
+  state = createTemporaryRegionIfNeeded(state, LCtx, tempExpr, ME);
   Bldr.generateNode(ME, Pred, state);
 }
 
@@ -381,11 +367,14 @@ void ExprEngine::VisitCXXNewExpr(const CXXNewExpr *CNE, ExplodedNode *Pred,
   if (!State)
     return;
 
-  // If we're compiling with exceptions enabled, and this allocation function
-  // is not declared as non-throwing, failures /must/ be signalled by
-  // exceptions, and thus the return value will never be NULL.
+  // If this allocation function is not declared as non-throwing, failures
+  // /must/ be signalled by exceptions, and thus the return value will never be
+  // NULL. -fno-exceptions does not influence this semantics.
+  // FIXME: GCC has a -fcheck-new option, which forces it to consider the case
+  // where new can return NULL. If we end up supporting that option, we can
+  // consider adding a check for it here.
   // C++11 [basic.stc.dynamic.allocation]p3.
-  if (FD && getContext().getLangOpts().CXXExceptions) {
+  if (FD) {
     QualType Ty = FD->getType();
     if (const FunctionProtoType *ProtoType = Ty->getAs<FunctionProtoType>())
       if (!ProtoType->isNothrow(getContext()))

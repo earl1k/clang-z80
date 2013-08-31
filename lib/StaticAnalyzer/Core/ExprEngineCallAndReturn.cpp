@@ -764,7 +764,7 @@ static bool mayInlineDecl(const CallEvent &Call, AnalysisDeclContext *CalleeADC,
       // Conditionally control the inlining of methods on objects that look
       // like C++ containers.
       if (!Opts.mayInlineCXXContainerCtorsAndDtors())
-        if (!Ctx.getSourceManager().isFromMainFile(FD->getLocation()))
+        if (!Ctx.getSourceManager().isInMainFile(FD->getLocation()))
           if (isContainerCtorOrDtor(Ctx, FD))
             return false;
             
@@ -806,12 +806,6 @@ bool ExprEngine::shouldInlineCall(const CallEvent &Call, const Decl *D,
   AnalyzerOptions &Opts = AMgr.options;
   AnalysisDeclContextManager &ADCMgr = AMgr.getAnalysisDeclContextManager();
   AnalysisDeclContext *CalleeADC = ADCMgr.getContext(D);
-
-  // Temporary object destructor processing is currently broken, so we never
-  // inline them.
-  // FIME: Remove this once temp destructors are working.
-  if ((*currBldrCtx->getBlock())[currStmtIdx].getAs<CFGTemporaryDtor>())
-    return false;
 
   // The auto-synthesized bodies are essential to inline as they are
   // usually small and commonly used. Note: we should do this check early on to

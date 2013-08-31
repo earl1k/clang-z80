@@ -311,6 +311,12 @@ TEST(DeclarationMatcher, ClassIsDerived) {
   EXPECT_TRUE(matches(
       "class X {}; class Y : public X {};",
       recordDecl(isDerivedFrom(recordDecl(hasName("X")).bind("test")))));
+
+  EXPECT_TRUE(matches(
+      "template<typename T> class X {};"
+      "template<typename T> using Z = X<T>;"
+      "template <typename T> class Y : Z<T> {};",
+      recordDecl(isDerivedFrom(namedDecl(hasName("X"))))));
 }
 
 TEST(DeclarationMatcher, hasMethod) {
@@ -1851,6 +1857,17 @@ TEST(Matcher, IntegerLiterals) {
   EXPECT_TRUE(notMatches("int i = 'a';", HasIntLiteral));
   EXPECT_TRUE(notMatches("int i = 1e10;", HasIntLiteral));
   EXPECT_TRUE(notMatches("int i = 10.0;", HasIntLiteral));
+}
+
+TEST(Matcher, FloatLiterals) {
+  StatementMatcher HasFloatLiteral = floatLiteral();
+  EXPECT_TRUE(matches("float i = 10.0;", HasFloatLiteral));
+  EXPECT_TRUE(matches("float i = 10.0f;", HasFloatLiteral));
+  EXPECT_TRUE(matches("double i = 10.0;", HasFloatLiteral));
+  EXPECT_TRUE(matches("double i = 10.0L;", HasFloatLiteral));
+  EXPECT_TRUE(matches("double i = 1e10;", HasFloatLiteral));
+
+  EXPECT_TRUE(notMatches("float i = 10;", HasFloatLiteral));
 }
 
 TEST(Matcher, NullPtrLiteral) {

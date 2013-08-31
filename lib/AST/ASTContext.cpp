@@ -133,8 +133,14 @@ RawComment *ASTContext::getRawCommentForDeclNoCache(const Decl *D) const {
       isa<RedeclarableTemplateDecl>(D) ||
       isa<ClassTemplateSpecializationDecl>(D))
     DeclLoc = D->getLocStart();
-  else
+  else {
     DeclLoc = D->getLocation();
+    // If location of the typedef name is in a macro, it is because being
+    // declared via a macro. Try using declaration's starting location
+    // as the "declaration location".
+    if (DeclLoc.isMacroID() && isa<TypedefDecl>(D))
+      DeclLoc = D->getLocStart();
+  }
 
   // If the declaration doesn't map directly to a location in a file, we
   // can't find the comment.
@@ -176,7 +182,8 @@ RawComment *ASTContext::getRawCommentForDeclNoCache(const Decl *D) const {
   // First check whether we have a trailing comment.
   if (Comment != RawComments.end() &&
       (*Comment)->isDocumentation() && (*Comment)->isTrailingComment() &&
-      (isa<FieldDecl>(D) || isa<EnumConstantDecl>(D) || isa<VarDecl>(D))) {
+      (isa<FieldDecl>(D) || isa<EnumConstantDecl>(D) || isa<VarDecl>(D) ||
+       isa<ObjCMethodDecl>(D) || isa<ObjCPropertyDecl>(D))) {
     std::pair<FileID, unsigned> CommentBeginDecomp
       = SourceMgr.getDecomposedLoc((*Comment)->getSourceRange().getBegin());
     // Check that Doxygen trailing comment comes after the declaration, starts
@@ -221,7 +228,7 @@ RawComment *ASTContext::getRawCommentForDeclNoCache(const Decl *D) const {
 
   // There should be no other declarations or preprocessor directives between
   // comment and declaration.
-  if (Text.find_first_of(",;{}#@") != StringRef::npos)
+  if (Text.find_first_of(";{}#@") != StringRef::npos)
     return NULL;
 
   return *Comment;
@@ -1035,13 +1042,20 @@ void ASTContext::eraseDeclAttrs(const Decl *D) {
   }
 }
 
+// FIXME: Remove ?
 MemberSpecializationInfo *
 ASTContext::getInstantiatedFromStaticDataMember(const VarDecl *Var) {
   assert(Var->isStaticDataMember() && "Not a static data member");
-  llvm::DenseMap<const VarDecl *, MemberSpecializationInfo *>::iterator Pos
-    = InstantiatedFromStaticDataMember.find(Var);
-  if (Pos == InstantiatedFromStaticDataMember.end())
-    return 0;
+  return getTemplateOrSpecializationInfo(Var)
+      .dyn_cast<MemberSpecializationInfo *>();
+}
+
+ASTContext::TemplateOrSpecializationInfo
+ASTContext::getTemplateOrSpecializationInfo(const VarDecl *Var) {
+  llvm::DenseMap<const VarDecl *, TemplateOrSpecializationInfo>::iterator Pos =
+      TemplateOrInstantiation.find(Var);
+  if (Pos == TemplateOrInstantiation.end())
+    return TemplateOrSpecializationInfo();
 
   return Pos->second;
 }
@@ -1052,10 +1066,16 @@ ASTContext::setInstantiatedFromStaticDataMember(VarDecl *Inst, VarDecl *Tmpl,
                                           SourceLocation PointOfInstantiation) {
   assert(Inst->isStaticDataMember() && "Not a static data member");
   assert(Tmpl->isStaticDataMember() && "Not a static data member");
-  assert(!InstantiatedFromStaticDataMember[Inst] &&
-         "Already noted what static data member was instantiated from");
-  InstantiatedFromStaticDataMember[Inst] 
-    = new (*this) MemberSpecializationInfo(Tmpl, TSK, PointOfInstantiation);
+  setTemplateOrSpecializationInfo(Inst, new (*this) MemberSpecializationInfo(
+                                            Tmpl, TSK, PointOfInstantiation));
+}
+
+void
+ASTContext::setTemplateOrSpecializationInfo(VarDecl *Inst,
+                                            TemplateOrSpecializationInfo TSI) {
+  assert(!TemplateOrInstantiation[Inst] &&
+         "Already noted what the variable was instantiated from");
+  TemplateOrInstantiation[Inst] = TSI;
 }
 
 FunctionDecl *ASTContext::getClassScopeSpecializationPattern(
@@ -1219,12 +1239,7 @@ const llvm::fltSemantics &ASTContext::getFloatTypeSemantics(QualType T) const {
   }
 }
 
-/// getDeclAlign - Return a conservative estimate of the alignment of the
-/// specified decl.  Note that bitfields do not have a valid alignment, so
-/// this method will assert on them.
-/// If @p RefAsPointee, references are treated like their underlying type
-/// (for alignof), else they're treated like pointers (for CodeGen).
-CharUnits ASTContext::getDeclAlign(const Decl *D, bool RefAsPointee) const {
+CharUnits ASTContext::getDeclAlign(const Decl *D, bool ForAlignof) const {
   unsigned Align = Target->getCharWidth();
 
   bool UseAlignAttrOnly = false;
@@ -1257,7 +1272,7 @@ CharUnits ASTContext::getDeclAlign(const Decl *D, bool RefAsPointee) const {
   } else if (const ValueDecl *VD = dyn_cast<ValueDecl>(D)) {
     QualType T = VD->getType();
     if (const ReferenceType* RT = T->getAs<ReferenceType>()) {
-      if (RefAsPointee)
+      if (ForAlignof)
         T = RT->getPointeeType();
       else
         T = getPointerType(RT->getPointeeType());
@@ -1265,14 +1280,15 @@ CharUnits ASTContext::getDeclAlign(const Decl *D, bool RefAsPointee) const {
     if (!T->isIncompleteType() && !T->isFunctionType()) {
       // Adjust alignments of declarations with array type by the
       // large-array alignment on the target.
-      unsigned MinWidth = Target->getLargeArrayMinWidth();
-      const ArrayType *arrayType;
-      if (MinWidth && (arrayType = getAsArrayType(T))) {
-        if (isa<VariableArrayType>(arrayType))
-          Align = std::max(Align, Target->getLargeArrayAlign());
-        else if (isa<ConstantArrayType>(arrayType) &&
-                 MinWidth <= getTypeSize(cast<ConstantArrayType>(arrayType)))
-          Align = std::max(Align, Target->getLargeArrayAlign());
+      if (const ArrayType *arrayType = getAsArrayType(T)) {
+        unsigned MinWidth = Target->getLargeArrayMinWidth();
+        if (!ForAlignof && MinWidth) {
+          if (isa<VariableArrayType>(arrayType))
+            Align = std::max(Align, Target->getLargeArrayAlign());
+          else if (isa<ConstantArrayType>(arrayType) &&
+                   MinWidth <= getTypeSize(cast<ConstantArrayType>(arrayType)))
+            Align = std::max(Align, Target->getLargeArrayAlign());
+        }
 
         // Walk through any array types while we're at it.
         T = getBaseElementType(arrayType);
@@ -2716,9 +2732,8 @@ ASTContext::getDependentSizedExtVectorType(QualType vecType,
 QualType
 ASTContext::getFunctionNoProtoType(QualType ResultTy,
                                    const FunctionType::ExtInfo &Info) const {
-  const CallingConv DefaultCC = Info.getCC();
-  const CallingConv CallConv = (LangOpts.MRTD && DefaultCC == CC_Default) ?
-                               CC_X86StdCall : DefaultCC;
+  const CallingConv CallConv = Info.getCC();
+
   // Unique functions, to guarantee there is only one function of a particular
   // structure.
   llvm::FoldingSetNodeID ID;
@@ -2730,11 +2745,8 @@ ASTContext::getFunctionNoProtoType(QualType ResultTy,
     return QualType(FT, 0);
 
   QualType Canonical;
-  if (!ResultTy.isCanonical() ||
-      getCanonicalCallConv(CallConv) != CallConv) {
-    Canonical =
-      getFunctionNoProtoType(getCanonicalType(ResultTy),
-                     Info.withCallingConv(getCanonicalCallConv(CallConv)));
+  if (!ResultTy.isCanonical()) {
+    Canonical = getFunctionNoProtoType(getCanonicalType(ResultTy), Info);
 
     // Get the new insert position for the node we care about.
     FunctionNoProtoType *NewIP =
@@ -2783,14 +2795,10 @@ ASTContext::getFunctionType(QualType ResultTy, ArrayRef<QualType> ArgArray,
     if (!ArgArray[i].isCanonicalAsParam())
       isCanonical = false;
 
-  const CallingConv DefaultCC = EPI.ExtInfo.getCC();
-  const CallingConv CallConv = (LangOpts.MRTD && DefaultCC == CC_Default) ?
-                               CC_X86StdCall : DefaultCC;
-
   // If this type isn't canonical, get the canonical version of it.
   // The exception spec is not part of the canonical type.
   QualType Canonical;
-  if (!isCanonical || getCanonicalCallConv(CallConv) != CallConv) {
+  if (!isCanonical) {
     SmallVector<QualType, 16> CanonicalArgs;
     CanonicalArgs.reserve(NumArgs);
     for (unsigned i = 0; i != NumArgs; ++i)
@@ -2800,8 +2808,6 @@ ASTContext::getFunctionType(QualType ResultTy, ArrayRef<QualType> ArgArray,
     CanonicalEPI.HasTrailingReturn = false;
     CanonicalEPI.ExceptionSpecType = EST_None;
     CanonicalEPI.NumExceptions = 0;
-    CanonicalEPI.ExtInfo
-      = CanonicalEPI.ExtInfo.withCallingConv(getCanonicalCallConv(CallConv));
 
     // Result types do not have ARC lifetime qualifiers.
     QualType CanResultTy = getCanonicalType(ResultTy);
@@ -2843,7 +2849,6 @@ ASTContext::getFunctionType(QualType ResultTy, ArrayRef<QualType> ArgArray,
 
   FunctionProtoType *FTP = (FunctionProtoType*) Allocate(Size, TypeAlignment);
   FunctionProtoType::ExtProtoInfo newEPI = EPI;
-  newEPI.ExtInfo = EPI.ExtInfo.withCallingConv(CallConv);
   new (FTP) FunctionProtoType(ResultTy, ArgArray, Canonical, newEPI);
   Types.push_back(FTP);
   FunctionProtoTypes.InsertNode(FTP, InsertPos);
@@ -6923,7 +6928,7 @@ QualType ASTContext::mergeFunctionTypes(QualType lhs, QualType rhs,
   FunctionType::ExtInfo rbaseInfo = rbase->getExtInfo();
 
   // Compatible functions must have compatible calling conventions
-  if (!isSameCallConv(lbaseInfo.getCC(), rbaseInfo.getCC()))
+  if (lbaseInfo.getCC() != rbaseInfo.getCC())
     return QualType();
 
   // Regparm is part of the calling convention.
@@ -7536,6 +7541,11 @@ static QualType DecodeTypeFromStr(const char *&Str, const ASTContext &Context,
            "Bad modifiers used with 'v'!");
     Type = Context.VoidTy;
     break;
+  case 'h':
+    assert(HowLong == 0 && !Signed && !Unsigned &&
+           "Bad modifiers used with 'f'!");
+    Type = Context.HalfTy;
+    break;
   case 'f':
     assert(HowLong == 0 && !Signed && !Unsigned &&
            "Bad modifiers used with 'f'!");
@@ -7763,7 +7773,7 @@ QualType ASTContext::GetBuiltinType(unsigned Id,
   assert((TypeStr[0] != '.' || TypeStr[1] == 0) &&
          "'.' should only occur at end of builtin type list!");
 
-  FunctionType::ExtInfo EI;
+  FunctionType::ExtInfo EI(CC_C);
   if (BuiltinInfo.isNoReturn(Id)) EI = EI.withNoReturn(true);
 
   bool Variadic = (TypeStr[0] == '.');
@@ -7801,8 +7811,9 @@ GVALinkage ASTContext::GetGVALinkageForFunction(const FunctionDecl *FD) {
 
   if (!FD->isInlined())
     return External;
-    
-  if (!getLangOpts().CPlusPlus || FD->hasAttr<GNUInlineAttr>()) {
+
+  if ((!getLangOpts().CPlusPlus && !getLangOpts().MicrosoftMode) ||
+      FD->hasAttr<GNUInlineAttr>()) {
     // GNU or C99 inline semantics. Determine whether this symbol should be
     // externally visible.
     if (FD->isInlineDefinitionExternallyVisible())
@@ -7933,16 +7944,13 @@ bool ASTContext::DeclMustBeEmitted(const Decl *D) {
   return false;
 }
 
-CallingConv ASTContext::getDefaultCXXMethodCallConv(bool isVariadic) {
+CallingConv ASTContext::getDefaultCallingConvention(bool IsVariadic,
+                                                    bool IsCXXMethod) const {
   // Pass through to the C++ ABI object
-  return ABI->getDefaultMethodCallConv(isVariadic);
-}
+  if (IsCXXMethod)
+    return ABI->getDefaultMethodCallConv(IsVariadic);
 
-CallingConv ASTContext::getCanonicalCallConv(CallingConv CC) const {
-  if (CC == CC_C && !LangOpts.MRTD &&
-      getTargetInfo().getCXXABI().isMemberFunctionCCDefault())
-    return CC_Default;
-  return CC;
+  return (LangOpts.MRTD && !IsVariadic) ? CC_X86StdCall : CC_C;
 }
 
 bool ASTContext::isNearlyEmpty(const CXXRecordDecl *RD) const {
@@ -7966,20 +7974,20 @@ MangleContext *ASTContext::createMangleContext() {
 CXXABI::~CXXABI() {}
 
 size_t ASTContext::getSideTableAllocatedMemory() const {
-  return ASTRecordLayouts.getMemorySize()
-    + llvm::capacity_in_bytes(ObjCLayouts)
-    + llvm::capacity_in_bytes(KeyFunctions)
-    + llvm::capacity_in_bytes(ObjCImpls)
-    + llvm::capacity_in_bytes(BlockVarCopyInits)
-    + llvm::capacity_in_bytes(DeclAttrs)
-    + llvm::capacity_in_bytes(InstantiatedFromStaticDataMember)
-    + llvm::capacity_in_bytes(InstantiatedFromUsingDecl)
-    + llvm::capacity_in_bytes(InstantiatedFromUsingShadowDecl)
-    + llvm::capacity_in_bytes(InstantiatedFromUnnamedFieldDecl)
-    + llvm::capacity_in_bytes(OverriddenMethods)
-    + llvm::capacity_in_bytes(Types)
-    + llvm::capacity_in_bytes(VariableArrayTypes)
-    + llvm::capacity_in_bytes(ClassScopeSpecializationPattern);
+  return ASTRecordLayouts.getMemorySize() +
+         llvm::capacity_in_bytes(ObjCLayouts) +
+         llvm::capacity_in_bytes(KeyFunctions) +
+         llvm::capacity_in_bytes(ObjCImpls) +
+         llvm::capacity_in_bytes(BlockVarCopyInits) +
+         llvm::capacity_in_bytes(DeclAttrs) +
+         llvm::capacity_in_bytes(TemplateOrInstantiation) +
+         llvm::capacity_in_bytes(InstantiatedFromUsingDecl) +
+         llvm::capacity_in_bytes(InstantiatedFromUsingShadowDecl) +
+         llvm::capacity_in_bytes(InstantiatedFromUnnamedFieldDecl) +
+         llvm::capacity_in_bytes(OverriddenMethods) +
+         llvm::capacity_in_bytes(Types) +
+         llvm::capacity_in_bytes(VariableArrayTypes) +
+         llvm::capacity_in_bytes(ClassScopeSpecializationPattern);
 }
 
 void ASTContext::setManglingNumber(const NamedDecl *ND, unsigned Number) {

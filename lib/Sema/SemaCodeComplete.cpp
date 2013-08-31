@@ -464,9 +464,8 @@ getRequiredQualification(ASTContext &Context,
   
   NestedNameSpecifier *Result = 0;
   while (!TargetParents.empty()) {
-    const DeclContext *Parent = TargetParents.back();
-    TargetParents.pop_back();
-    
+    const DeclContext *Parent = TargetParents.pop_back_val();
+
     if (const NamespaceDecl *Namespace = dyn_cast<NamespaceDecl>(Parent)) {
       if (!Namespace->getIdentifier())
         continue;
@@ -3188,7 +3187,7 @@ void Sema::CodeCompleteModuleImport(SourceLocation ImportLoc,
                                  ? CXAvailability_Available
                                   : CXAvailability_NotAvailable));
     }
-  } else {
+  } else if (getLangOpts().Modules) {
     // Load the named module.
     Module *Mod = PP.getModuleLoader().loadModule(ImportLoc, Path,
                                                   Module::AllVisible,
@@ -3846,7 +3845,7 @@ namespace {
   };
 }
 
-static bool anyNullArguments(llvm::ArrayRef<Expr*> Args) {
+static bool anyNullArguments(ArrayRef<Expr *> Args) {
   if (Args.size() && !Args.data())
     return true;
 
@@ -3857,8 +3856,7 @@ static bool anyNullArguments(llvm::ArrayRef<Expr*> Args) {
   return false;
 }
 
-void Sema::CodeCompleteCall(Scope *S, Expr *FnIn,
-                            llvm::ArrayRef<Expr *> Args) {
+void Sema::CodeCompleteCall(Scope *S, Expr *FnIn, ArrayRef<Expr *> Args) {
   if (!CodeCompleter)
     return;
 
@@ -5672,7 +5670,7 @@ void Sema::CodeCompleteObjCForCollection(Scope *S,
   Data.ObjCCollection = true;
   
   if (IterationVar.getAsOpaquePtr()) {
-    DeclGroupRef DG = IterationVar.getAsVal<DeclGroupRef>();
+    DeclGroupRef DG = IterationVar.get();
     for (DeclGroupRef::iterator I = DG.begin(), End = DG.end(); I != End; ++I) {
       if (*I)
         Data.IgnoreDecls.push_back(*I);

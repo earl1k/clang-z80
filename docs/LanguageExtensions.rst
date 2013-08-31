@@ -807,8 +807,7 @@ Use ``__has_feature(cxx_contextual_conversions)`` or
 ``__has_extension(cxx_contextual_conversions)`` to determine if the C++1y rules
 are used when performing an implicit conversion for an array bound in a
 *new-expression*, the operand of a *delete-expression*, an integral constant
-expression, or a condition in a ``switch`` statement. Clang does not yet
-support this feature.
+expression, or a condition in a ``switch`` statement.
 
 C++1y decltype(auto)
 ^^^^^^^^^^^^^^^^^^^^
@@ -827,9 +826,9 @@ for default initializers in aggregate members is enabled.
 C++1y generalized lambda capture
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Use ``__has_feature(cxx_generalized_capture)`` or
-``__has_extension(cxx_generalized_capture`` to determine if support for
-generalized lambda captures is enabled
+Use ``__has_feature(cxx_init_capture)`` or
+``__has_extension(cxx_init_capture)`` to determine if support for
+lambda captures with explicit initializers is enabled
 (for instance, ``[n(0)] { return ++n; }``).
 Clang does not yet support this feature.
 
@@ -849,7 +848,6 @@ Use ``__has_feature(cxx_relaxed_constexpr)`` or
 ``__has_extension(cxx_relaxed_constexpr)`` to determine if variable
 declarations, local variable modification, and control flow constructs
 are permitted in ``constexpr`` functions.
-Clang's implementation of this feature is incomplete.
 
 C++1y return type deduction
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1257,6 +1255,23 @@ Further examples of these attributes are available in the static analyzer's `lis
 Query for these features with ``__has_attribute(ns_consumed)``,
 ``__has_attribute(ns_returns_retained)``, etc.
 
+objc_msg_lookup_stret
+---------------------
+
+Traditionally, if a runtime is used that follows the GNU Objective-C ABI, a
+call to objc_msg_lookup() would be emitted for each message send, which would
+return a pointer to the actual implementation of the method. However,
+objc_msg_lookup() has no information at all about the method signature of the
+actual method. Therefore, certain features like forwarding messages cannot be
+correctly implemented for methods returning structs using objc_msg_lookup(), as
+methods returning structs use a slightly different calling convention.
+
+To work around this, Clang emits calls to objc_msg_lookup_stret() instead for
+methods that return structs if the runtime supports this, allowing the runtime
+to use a different forwarding handler for methods returning structs.
+
+To check if Clang emits calls to objc_msg_lookup_stret(),
+__has_feature(objc_msg_lookup_stret) can be used.
 
 Function Overloading in C
 =========================
@@ -1440,8 +1455,8 @@ for the implementation of various target-specific header files like
 
 .. code-block:: c++
 
-  // Identity operation - return 4-element vector V1.
-  __builtin_shufflevector(V1, V1, 0, 1, 2, 3)
+  // identity operation - return 4-element vector v1.
+  __builtin_shufflevector(v1, v1, 0, 1, 2, 3)
 
   // "Splat" element 0 of V1 into a 4-element result.
   __builtin_shufflevector(V1, V1, 0, 0, 0, 0)
@@ -1455,6 +1470,9 @@ for the implementation of various target-specific header files like
   // Concatenate every other element of 8-element vectors V1 and V2.
   __builtin_shufflevector(V1, V2, 0, 2, 4, 6, 8, 10, 12, 14)
 
+  // Shuffle v1 with some elements being undefined
+  __builtin_shufflevector(v1, v1, 3, -1, 1, -1)
+
 **Description**:
 
 The first two arguments to ``__builtin_shufflevector`` are vectors that have
@@ -1463,7 +1481,8 @@ specify the elements indices of the first two vectors that should be extracted
 and returned in a new vector.  These element indices are numbered sequentially
 starting with the first vector, continuing into the second vector.  Thus, if
 ``vec1`` is a 4-element vector, index 5 would refer to the second element of
-``vec2``.
+``vec2``. An index of -1 can be used to indicate that the corresponding element
+in the returned vector is a don't care and can be optimized by the backend.
 
 The result of ``__builtin_shufflevector`` is a vector with the same element
 type as ``vec1``/``vec2`` but that has an element count equal to the number of
@@ -2002,6 +2021,33 @@ Use ``__attribute__((shared_locks_required(...)))`` on a function declaration
 to specify that the function must be called while holding the listed shared
 locks.  Arguments must be lockable type, and there must be at least one
 argument.
+
+Consumed Annotation Checking
+============================
+
+Clang supports additional attributes for checking basic resource management
+properties, specifically for unique objects that have a single owning reference.
+The following attributes are currently supported, although **the implementation
+for these annotations is currently in development and are subject to change.**
+
+``consumes``
+------------
+
+Use ``__attribute__((consumes))`` on a method that transitions an object into
+the consumed state.
+
+``callable_when_unconsumed``
+----------------------------
+
+Use ``__attribute__((callable_when_unconsumed))`` to indicate that a method may
+only be called when the object is not in the consumed state.
+
+``tests_unconsumed``
+--------------------
+
+Use `__attribute__((tests_unconsumed))`` to indicate that a method returns true
+if the object is in the unconsumed state.
+
 
 Type Safety Checking
 ====================

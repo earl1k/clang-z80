@@ -1384,9 +1384,8 @@ public:
   ///
   /// By default, performs semantic analysis to build the new statement.
   /// Subclasses may override this routine to provide different behavior.
-  StmtResult RebuildCXXTryStmt(SourceLocation TryLoc,
-                               Stmt *TryBlock,
-                               MultiStmtArg Handlers) {
+  StmtResult RebuildCXXTryStmt(SourceLocation TryLoc, Stmt *TryBlock,
+                               ArrayRef<Stmt *> Handlers) {
     return getSema().ActOnCXXTryBlock(TryLoc, TryBlock, Handlers);
   }
 
@@ -6251,7 +6250,7 @@ template<typename Derived>
 StmtResult
 TreeTransform<Derived>::TransformOMPParallelDirective(OMPParallelDirective *D) {
   // Transform the clauses
-  llvm::SmallVector<OMPClause *, 5> TClauses;
+  SmallVector<OMPClause *, 5> TClauses;
   ArrayRef<OMPClause *> Clauses = D->clauses();
   TClauses.reserve(Clauses.size());
   for (ArrayRef<OMPClause *>::iterator I = Clauses.begin(), E = Clauses.end();
@@ -6292,7 +6291,7 @@ TreeTransform<Derived>::TransformOMPDefaultClause(OMPDefaultClause *C) {
 template<typename Derived>
 OMPClause *
 TreeTransform<Derived>::TransformOMPPrivateClause(OMPPrivateClause *C) {
-  llvm::SmallVector<Expr *, 5> Vars;
+  SmallVector<Expr *, 5> Vars;
   Vars.reserve(C->varlist_size());
   for (OMPVarList<OMPPrivateClause>::varlist_iterator I = C->varlist_begin(),
                                                       E = C->varlist_end();
@@ -7317,7 +7316,7 @@ TreeTransform<Derived>::TransformCXXFunctionalCastExpr(
     return SemaRef.Owned(E);
 
   return getDerived().RebuildCXXFunctionalCastExpr(Type,
-                                      /*FIXME:*/E->getSubExpr()->getLocStart(),
+                                                   E->getLParenLoc(),
                                                    SubExpr.get(),
                                                    E->getRParenLoc());
 }
@@ -7926,6 +7925,19 @@ TreeTransform<Derived>::TransformTypeTraitExpr(TypeTraitExpr *E) {
       if (To.isNull())
         return ExprError();
 
+      if (To->containsUnexpandedParameterPack()) {
+        To = getDerived().RebuildPackExpansionType(To,
+                                                   PatternTL.getSourceRange(),
+                                                   ExpansionTL.getEllipsisLoc(),
+                                                   NumExpansions);
+        if (To.isNull())
+          return ExprError();
+
+        PackExpansionTypeLoc ToExpansionTL
+          = TLB.push<PackExpansionTypeLoc>(To);
+        ToExpansionTL.setEllipsisLoc(ExpansionTL.getEllipsisLoc());
+      }
+
       Args.push_back(TLB.getTypeSourceInfo(SemaRef.Context, To));
     }
 
@@ -8222,7 +8234,7 @@ TreeTransform<Derived>::TransformLambdaScope(LambdaExpr *E,
 
   // Transform any init-capture expressions before entering the scope of the
   // lambda.
-  llvm::SmallVector<ExprResult, 8> InitCaptureExprs;
+  SmallVector<ExprResult, 8> InitCaptureExprs;
   InitCaptureExprs.resize(E->explicit_capture_end() -
                           E->explicit_capture_begin());
   for (LambdaExpr::capture_iterator C = E->capture_begin(),
@@ -8241,6 +8253,7 @@ TreeTransform<Derived>::TransformLambdaScope(LambdaExpr *E,
   sema::LambdaScopeInfo *LSI
     = getSema().enterLambdaScope(CallOperator, E->getIntroducerRange(),
                                  E->getCaptureDefault(),
+                                 E->getCaptureDefaultLoc(),
                                  E->hasExplicitParameters(),
                                  E->hasExplicitResultType(),
                                  E->isMutable());
@@ -9372,7 +9385,7 @@ QualType TreeTransform<Derived>::RebuildUnresolvedUsingType(Decl *D) {
   TypeDecl *Ty;
   if (isa<UsingDecl>(D)) {
     UsingDecl *Using = cast<UsingDecl>(D);
-    assert(Using->isTypeName() &&
+    assert(Using->hasTypename() &&
            "UnresolvedUsingTypenameDecl transformed to non-typename using");
 
     // A valid resolved using typename decl points to exactly one type decl.
@@ -9471,7 +9484,7 @@ TreeTransform<Derived>::RebuildTemplateName(CXXScopeSpec &SS,
                                        ParsedType::make(ObjectType),
                                        /*EnteringContext=*/false,
                                        Template);
-  return Template.template getAsVal<TemplateName>();
+  return Template.get();
 }
 
 template<typename Derived>

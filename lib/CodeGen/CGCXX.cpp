@@ -172,20 +172,6 @@ bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
   return false;
 }
 
-void CodeGenModule::EmitCXXConstructors(const CXXConstructorDecl *D) {
-  // The constructor used for constructing this as a complete class;
-  // constucts the virtual bases, then calls the base constructor.
-  if (!D->getParent()->isAbstract()) {
-    // We don't need to emit the complete ctor if the class is abstract.
-    EmitGlobal(GlobalDecl(D, Ctor_Complete));
-  }
-
-  // The constructor used for constructing this as a base class;
-  // ignores virtual bases.
-  if (getTarget().getCXXABI().hasConstructorVariants())
-    EmitGlobal(GlobalDecl(D, Ctor_Base));
-}
-
 void CodeGenModule::EmitCXXConstructor(const CXXConstructorDecl *ctor,
                                        CXXCtorType ctorType) {
   // The complete constructor is equivalent to the base constructor
@@ -228,22 +214,6 @@ CodeGenModule::GetAddrOfCXXConstructor(const CXXConstructorDecl *ctor,
                                                       /*ForVTable=*/false));
 }
 
-void CodeGenModule::EmitCXXDestructors(const CXXDestructorDecl *D) {
-  // The destructor in a virtual table is always a 'deleting'
-  // destructor, which calls the complete destructor and then uses the
-  // appropriate operator delete.
-  if (D->isVirtual())
-    EmitGlobal(GlobalDecl(D, Dtor_Deleting));
-
-  // The destructor used for destructing this as a most-derived class;
-  // call the base destructor and then destructs any virtual bases.
-  EmitGlobal(GlobalDecl(D, Dtor_Complete));
-
-  // The destructor used for destructing this as a base class; ignores
-  // virtual bases.
-  EmitGlobal(GlobalDecl(D, Dtor_Base));
-}
-
 void CodeGenModule::EmitCXXDestructor(const CXXDestructorDecl *dtor,
                                       CXXDtorType dtorType) {
   // The complete destructor is equivalent to the base destructor for
@@ -277,37 +247,37 @@ void CodeGenModule::EmitCXXDestructor(const CXXDestructorDecl *dtor,
 llvm::GlobalValue *
 CodeGenModule::GetAddrOfCXXDestructor(const CXXDestructorDecl *dtor,
                                       CXXDtorType dtorType,
-                                      const CGFunctionInfo *fnInfo) {
+                                      const CGFunctionInfo *fnInfo,
+                                      llvm::FunctionType *fnType) {
+  // If the class has no virtual bases, then the complete and base destructors
+  // are equivalent, for all C++ ABIs supported by clang.  We can save on code
+  // size by calling the base dtor directly, especially if we'd have to emit a
+  // thunk otherwise.
+  // FIXME: We should do this for Itanium, after verifying that nothing breaks.
+  if (dtorType == Dtor_Complete && dtor->getParent()->getNumVBases() == 0 &&
+      getCXXABI().useThunkForDtorVariant(dtor, Dtor_Complete))
+    dtorType = Dtor_Base;
+
   GlobalDecl GD(dtor, dtorType);
 
   StringRef name = getMangledName(GD);
   if (llvm::GlobalValue *existing = GetGlobalValue(name))
     return existing;
 
-  if (!fnInfo) fnInfo = &getTypes().arrangeCXXDestructor(dtor, dtorType);
-
-  llvm::FunctionType *fnType = getTypes().GetFunctionType(*fnInfo);
+  if (!fnType) {
+    if (!fnInfo) fnInfo = &getTypes().arrangeCXXDestructor(dtor, dtorType);
+    fnType = getTypes().GetFunctionType(*fnInfo);
+  }
   return cast<llvm::Function>(GetOrCreateLLVMFunction(name, fnType, GD,
                                                       /*ForVTable=*/false));
-}
-
-llvm::Value *
-CodeGenFunction::BuildVirtualCall(GlobalDecl GD, llvm::Value *This,
-                                  llvm::Type *Ty) {
-  GD = GD.getCanonicalDecl();
-  uint64_t VTableIndex = CGM.getVTableContext().getMethodVTableIndex(GD);
-
-  Ty = Ty->getPointerTo()->getPointerTo();
-  llvm::Value *VTable = GetVTablePtr(This, Ty);
-  llvm::Value *VFuncPtr =
-    Builder.CreateConstInBoundsGEP1_64(VTable, VTableIndex, "vfn");
-  return Builder.CreateLoad(VFuncPtr);
 }
 
 static llvm::Value *BuildAppleKextVirtualCall(CodeGenFunction &CGF,
                                               GlobalDecl GD,
                                               llvm::Type *Ty,
                                               const CXXRecordDecl *RD) {
+  assert(!CGF.CGM.getTarget().getCXXABI().isMicrosoft() &&
+         "No kext in Microsoft ABI");
   GD = GD.getCanonicalDecl();
   CodeGenModule &CGM = CGF.CGM;
   llvm::Value *VTable = CGM.getVTables().GetAddrOfVTable(RD);

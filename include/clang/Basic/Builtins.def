@@ -25,6 +25,7 @@
 //  c -> char
 //  s -> short
 //  i -> int
+//  h -> half
 //  f -> float
 //  d -> double
 //  z -> size_t
@@ -886,6 +887,10 @@ LIBBUILTIN(logf, "ff", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(log2, "dd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(log2l, "LdLd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(log2f, "ff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(lrint, "Lid", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(lrintl, "LiLd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(lrintf, "Lif", "fc", "math.h", ALL_LANGUAGES)
 
 LIBBUILTIN(nearbyint, "dd", "fc", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(nearbyintl, "LdLd", "fc", "math.h", ALL_LANGUAGES)

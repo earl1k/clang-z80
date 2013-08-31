@@ -1089,8 +1089,6 @@ CodeGenFunction::GenerateBlockFunction(GlobalDecl GD,
                                        bool IsLambdaConversionToBlock) {
   const BlockDecl *blockDecl = blockInfo.getBlockDecl();
 
-  // Check if we should generate debug info for this block function.
-  maybeInitializeDebugInfo();
   CurGD = GD;
   
   BlockInfo = &blockInfo;
@@ -1303,9 +1301,6 @@ CodeGenFunction::GenerateCopyHelperFunction(const CGBlockInfo &blockInfo) {
   IdentifierInfo *II
     = &CGM.getContext().Idents.get("__copy_helper_block_");
 
-  // Check if we should generate debug info for this block helper function.
-  maybeInitializeDebugInfo();
-
   FunctionDecl *FD = FunctionDecl::Create(C,
                                           C.getTranslationUnitDecl(),
                                           SourceLocation(),
@@ -1313,9 +1308,10 @@ CodeGenFunction::GenerateCopyHelperFunction(const CGBlockInfo &blockInfo) {
                                           SC_Static,
                                           false,
                                           false);
-  StartFunction(FD, C.VoidTy, Fn, FI, args, SourceLocation());
-  // Don't emit any line table entries for the body of this function.
+  // Create a scope with an artificial location for the body of this function.
   ArtificialLocation AL(*this, Builder);
+  StartFunction(FD, C.VoidTy, Fn, FI, args, SourceLocation());
+  AL.Emit();
 
   llvm::Type *structPtrTy = blockInfo.StructureType->getPointerTo();
 
@@ -1477,9 +1473,6 @@ CodeGenFunction::GenerateDestroyHelperFunction(const CGBlockInfo &blockInfo) {
     llvm::Function::Create(LTy, llvm::GlobalValue::InternalLinkage,
                            "__destroy_helper_block_", &CGM.getModule());
 
-  // Check if we should generate debug info for this block destroy function.
-  maybeInitializeDebugInfo();
-
   IdentifierInfo *II
     = &CGM.getContext().Idents.get("__destroy_helper_block_");
 
@@ -1488,9 +1481,10 @@ CodeGenFunction::GenerateDestroyHelperFunction(const CGBlockInfo &blockInfo) {
                                           SourceLocation(), II, C.VoidTy, 0,
                                           SC_Static,
                                           false, false);
-  StartFunction(FD, C.VoidTy, Fn, FI, args, SourceLocation());
-  // Don't emit any line table entries for the body of this function.
+  // Create a scope with an artificial location for the body of this function.
   ArtificialLocation AL(*this, Builder);
+  StartFunction(FD, C.VoidTy, Fn, FI, args, SourceLocation());
+  AL.Emit();
 
   llvm::Type *structPtrTy = blockInfo.StructureType->getPointerTo();
 
@@ -1781,8 +1775,6 @@ generateByrefCopyHelper(CodeGenFunction &CGF,
                                           SC_Static,
                                           false, false);
 
-  // Initialize debug info if necessary.
-  CGF.maybeInitializeDebugInfo();
   CGF.StartFunction(FD, R, Fn, FI, args, SourceLocation());
 
   if (byrefInfo.needsCopy()) {
@@ -1854,8 +1846,6 @@ generateByrefDisposeHelper(CodeGenFunction &CGF,
                                           SourceLocation(), II, R, 0,
                                           SC_Static,
                                           false, false);
-  // Initialize debug info if necessary.
-  CGF.maybeInitializeDebugInfo();
   CGF.StartFunction(FD, R, Fn, FI, args, SourceLocation());
 
   if (byrefInfo.needsDispose()) {

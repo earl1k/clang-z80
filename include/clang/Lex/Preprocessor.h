@@ -1001,8 +1001,9 @@ public:
 
   /// \brief Relex the token at the specified location.
   /// \returns true if there was a failure, false on success.
-  bool getRawToken(SourceLocation Loc, Token &Result) {
-    return Lexer::getRawToken(Loc, Result, SourceMgr, LangOpts);
+  bool getRawToken(SourceLocation Loc, Token &Result,
+                   bool IgnoreWhiteSpace = false) {
+    return Lexer::getRawToken(Loc, Result, SourceMgr, LangOpts, IgnoreWhiteSpace);
   }
 
   /// getSpellingOfSingleCharacterNumericConstant - Tok is a numeric constant
@@ -1457,7 +1458,8 @@ private:
   void HandleElifDirective(Token &Tok);
 
   // Pragmas.
-  void HandlePragmaDirective(unsigned Introducer);
+  void HandlePragmaDirective(SourceLocation IntroducerLoc,
+                             PragmaIntroducerKind Introducer);
 public:
   void HandlePragmaOnce(Token &OnceTok);
   void HandlePragmaMark();

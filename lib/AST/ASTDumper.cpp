@@ -745,6 +745,9 @@ void ASTDumper::dumpDecl(const Decl *D) {
   lastChild();
   dumpFullComment(Comment);
 
+  if (D->isInvalidDecl())
+    OS << " invalid";
+
   setMoreChildren(false);
   if (HasDeclContext)
     dumpDeclContext(cast<DeclContext>(D));
@@ -780,6 +783,8 @@ void ASTDumper::VisitRecordDecl(const RecordDecl *D) {
   dumpName(D);
   if (D->isModulePrivate())
     OS << " __module_private__";
+  if (D->isCompleteDefinition())
+    OS << " definition";
 }
 
 void ASTDumper::VisitEnumConstantDecl(const EnumConstantDecl *D) {

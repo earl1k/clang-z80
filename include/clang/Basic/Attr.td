@@ -126,8 +126,18 @@ class Attr {
   code AdditionalMembers = [{}];
 }
 
+/// A type attribute is not processed on a declaration or a statement.
+class TypeAttr : Attr {
+  let ASTNode = 0;
+}
+
 /// An inheritable attribute is inherited by later redeclarations.
 class InheritableAttr : Attr;
+
+/// A target-specific attribute that is meant to be processed via
+/// TargetAttributesSema::ProcessDeclAttribute.  This class is meant to be used
+/// as a mixin with InheritableAttr or Attr depending on the attribute's needs.
+class TargetSpecificAttr;
 
 /// An inheritable parameter attribute is inherited by later
 /// redeclarations, even when it's written on a parameter.
@@ -144,10 +154,9 @@ class IgnoredAttr : Attr {
 // Attributes begin here
 //
 
-def AddressSpace : Attr {
+def AddressSpace : TypeAttr {
   let Spellings = [GNU<"address_space">];
   let Args = [IntArgument<"AddressSpace">];
-  let ASTNode = 0;
 }
 
 def Alias : InheritableAttr {
@@ -417,23 +426,17 @@ def MayAlias : InheritableAttr {
   let Spellings = [GNU<"may_alias">, CXX11<"gnu", "may_alias">];
 }
 
-def MSP430Interrupt : InheritableAttr {
+def MSABI : InheritableAttr {
+  let Spellings = [GNU<"ms_abi">, CXX11<"gnu", "ms_abi">];
+}
+
+def MSP430Interrupt : InheritableAttr, TargetSpecificAttr {
   let Spellings = [];
   let Args = [UnsignedArgument<"Number">];
   let SemaHandler = 0;
 }
 
-def MBlazeInterruptHandler : InheritableAttr {
-  let Spellings = [];
-  let SemaHandler = 0;
-}
-
-def MBlazeSaveVolatiles : InheritableAttr {
-  let Spellings = [];
-  let SemaHandler = 0;
-}
-
-def Mips16 : InheritableAttr {
+def Mips16 : InheritableAttr, TargetSpecificAttr {
   let Spellings = [GNU<"mips16">, CXX11<"gnu", "mips16">];
   let Subjects = [Function];
 }
@@ -447,16 +450,14 @@ def Naked : InheritableAttr {
   let Spellings = [GNU<"naked">, CXX11<"gnu", "naked">];
 }
 
-def NeonPolyVectorType : Attr {
+def NeonPolyVectorType : TypeAttr {
   let Spellings = [GNU<"neon_polyvector_type">];
   let Args = [IntArgument<"NumElements">];
-  let ASTNode = 0;
 }
 
-def NeonVectorType : Attr {
+def NeonVectorType : TypeAttr {
   let Spellings = [GNU<"neon_vector_type">];
   let Args = [IntArgument<"NumElements">];
-  let ASTNode = 0;
 }
 
 def ReturnsTwice : InheritableAttr {
@@ -475,7 +476,7 @@ def NoInline : InheritableAttr {
   let Spellings = [GNU<"noinline">, CXX11<"gnu", "noinline">];
 }
 
-def NoMips16 : InheritableAttr {
+def NoMips16 : InheritableAttr, TargetSpecificAttr {
   let Spellings = [GNU<"nomips16">, CXX11<"gnu", "nomips16">];
   let Subjects = [Function];
 }
@@ -663,6 +664,10 @@ def StdCall : InheritableAttr {
                    Keyword<"__stdcall">, Keyword<"_stdcall">];
 }
 
+def SysVABI : InheritableAttr {
+  let Spellings = [GNU<"sysv_abi">, CXX11<"gnu", "sysv_abi">];
+}
+
 def ThisCall : InheritableAttr {
   let Spellings = [GNU<"thiscall">, CXX11<"gnu", "thiscall">,
                    Keyword<"__thiscall">, Keyword<"_thiscall">];
@@ -686,10 +691,9 @@ def ArcWeakrefUnavailable : InheritableAttr {
   let Subjects = [ObjCInterface];
 }
 
-def ObjCGC : Attr {
+def ObjCGC : TypeAttr {
   let Spellings = [GNU<"objc_gc">];
   let Args = [IdentifierArgument<"Kind">];
-  let ASTNode = 0;
 }
 
 def ObjCOwnership : InheritableAttr {
@@ -717,10 +721,9 @@ def Uuid : InheritableAttr {
   let Subjects = [CXXRecord];
 }
 
-def VectorSize : Attr {
+def VectorSize : TypeAttr {
   let Spellings = [GNU<"vector_size">, CXX11<"gnu", "vector_size">];
   let Args = [ExprArgument<"NumBytes">];
-  let ASTNode = 0;
 }
 
 def VecTypeHint : InheritableAttr {
@@ -749,6 +752,11 @@ def VecReturn : InheritableAttr {
   let Subjects = [CXXRecord];
 }
 
+def WarnUnused : InheritableAttr {
+  let Spellings = [GNU<"warn_unused">, CXX11<"gnu", "warn_unused">];
+  let Subjects = [Record];
+}
+
 def WarnUnusedResult : InheritableAttr {
   let Spellings = [GNU<"warn_unused_result">,
                    CXX11<"clang", "warn_unused_result">,
@@ -767,7 +775,7 @@ def WeakRef : InheritableAttr {
   let Spellings = [GNU<"weakref">, CXX11<"gnu", "weakref">];
 }
 
-def X86ForceAlignArgPointer : InheritableAttr {
+def X86ForceAlignArgPointer : InheritableAttr, TargetSpecificAttr {
   let Spellings = [];
 }
 
@@ -918,6 +926,33 @@ def SharedLocksRequired : InheritableAttr {
   let TemplateDependent = 1;
 }
 
+// C/C++ consumed attributes.
+
+def Consumable : InheritableAttr {
+  let Spellings = [GNU<"consumable">];
+  let Subjects = [CXXRecord];
+}
+
+def CallableWhenUnconsumed : InheritableAttr {
+  let Spellings = [GNU<"callable_when_unconsumed">];
+  let Subjects = [CXXMethod];
+}
+
+def TestsUnconsumed : InheritableAttr {
+  let Spellings = [GNU<"tests_unconsumed">];
+  let Subjects = [CXXMethod];
+}
+
+def TestsConsumed : InheritableAttr {
+  let Spellings = [GNU<"tests_consumed">];
+  let Subjects = [CXXMethod];
+}
+
+def Consumes : InheritableAttr {
+  let Spellings = [GNU<"consumes">];
+  let Subjects = [CXXMethod];
+}
+
 // Type safety attributes for `void *' pointers and type tags.
 
 def ArgumentWithTypeTag : InheritableAttr {
@@ -941,7 +976,7 @@ def TypeTagForDatatype : InheritableAttr {
 
 // Microsoft-related attributes
 
-def MsProperty : Attr {
+def MsProperty : IgnoredAttr {
   let Spellings = [Declspec<"property">];
 }
 
@@ -949,11 +984,11 @@ def MsStruct : InheritableAttr {
   let Spellings = [Declspec<"ms_struct">];
 }
 
-def DLLExport : InheritableAttr {
+def DLLExport : InheritableAttr, TargetSpecificAttr {
   let Spellings = [Declspec<"dllexport">];
 }
 
-def DLLImport : InheritableAttr {
+def DLLImport : InheritableAttr, TargetSpecificAttr {
   let Spellings = [Declspec<"dllimport">];
 }
 
@@ -969,19 +1004,19 @@ def Win64 : InheritableAttr {
   let Spellings = [Keyword<"__w64">];
 }
 
-def Ptr32 : InheritableAttr {
+def Ptr32 : TypeAttr {
   let Spellings = [Keyword<"__ptr32">];
 }
 
-def Ptr64 : InheritableAttr {
+def Ptr64 : TypeAttr {
   let Spellings = [Keyword<"__ptr64">];
 }
 
-def SPtr : InheritableAttr {
+def SPtr : TypeAttr {
   let Spellings = [Keyword<"__sptr">];
 }
 
-def UPtr : InheritableAttr {
+def UPtr : TypeAttr {
   let Spellings = [Keyword<"__uptr">];
 }
 

@@ -2233,7 +2233,7 @@ static void removePunyEdges(PathPieces &path,
     SourceLocation FirstLoc = start->getLocStart();
     SourceLocation SecondLoc = end->getLocStart();
 
-    if (!SM.isFromSameFile(FirstLoc, SecondLoc))
+    if (!SM.isWrittenInSameFile(FirstLoc, SecondLoc))
       continue;
     if (SM.isBeforeInTranslationUnit(SecondLoc, FirstLoc))
       std::swap(SecondLoc, FirstLoc);
@@ -2651,10 +2651,8 @@ void BugReport::pushInterestingSymbolsAndRegions() {
 }
 
 void BugReport::popInterestingSymbolsAndRegions() {
-  delete interestingSymbols.back();
-  interestingSymbols.pop_back();
-  delete interestingRegions.back();
-  interestingRegions.pop_back();
+  delete interestingSymbols.pop_back_val();
+  delete interestingRegions.pop_back_val();
 }
 
 const Stmt *BugReport::getStmt() const {
@@ -3202,6 +3200,25 @@ void BugReporter::Register(BugType *BT) {
 }
 
 void BugReporter::emitReport(BugReport* R) {
+  // Defensive checking: throw the bug away if it comes from a BodyFarm-
+  // generated body. We do this very early because report processing relies
+  // on the report's location being valid.
+  // FIXME: Valid bugs can occur in BodyFarm-generated bodies, so really we
+  // need to just find a reasonable location like we do later on with the path
+  // pieces.
+  if (const ExplodedNode *E = R->getErrorNode()) {
+    const LocationContext *LCtx = E->getLocationContext();
+    if (LCtx->getAnalysisDeclContext()->isBodyAutosynthesized())
+      return;
+  }
+  
+  bool ValidSourceLoc = R->getLocation(getSourceManager()).isValid();
+  assert(ValidSourceLoc);
+  // If we mess up in a release build, we'd still prefer to just drop the bug
+  // instead of trying to go on.
+  if (!ValidSourceLoc)
+    return;
+
   // Compute the bug report's hash to determine its equivalence class.
   llvm::FoldingSetNodeID ID;
   R->Profile(ID);
