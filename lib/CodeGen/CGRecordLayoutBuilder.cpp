@@ -201,8 +201,9 @@ public:
 }
 
 void CGRecordLayoutBuilder::Layout(const RecordDecl *D) {
-  Alignment = Types.getContext().getASTRecordLayout(D).getAlignment();
-  Packed = D->hasAttr<PackedAttr>();
+  const ASTRecordLayout &Layout = Types.getContext().getASTRecordLayout(D);
+  Alignment = Layout.getAlignment();
+  Packed = D->hasAttr<PackedAttr>() || Layout.getSize() % Alignment != 0;
 
   if (D->isUnion()) {
     LayoutUnion(D);
@@ -696,7 +697,7 @@ CGRecordLayoutBuilder::LayoutNonVirtualBases(const CXXRecordDecl *RD,
   }
 
   // Add a vb-table pointer if the layout insists.
-  if (Layout.getVBPtrOffset() != CharUnits::fromQuantity(-1)) {
+    if (Layout.hasOwnVBPtr()) {
     CharUnits VBPtrOffset = Layout.getVBPtrOffset();
     llvm::Type *Vbptr = llvm::Type::getInt32PtrTy(Types.getLLVMContext());
     AppendPadding(VBPtrOffset, getTypeAlignment(Vbptr));

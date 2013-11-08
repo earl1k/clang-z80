@@ -556,8 +556,11 @@ bool Sema::CheckARMBuiltinExclusiveCall(unsigned BuiltinID, CallExpr *TheCall) {
   ValArg = PerformCopyInitialization(Entity, SourceLocation(), ValArg);
   if (ValArg.isInvalid())
     return true;
-
   TheCall->setArg(0, ValArg.get());
+
+  // __builtin_arm_strex always returns an int. It's marked as such in the .def,
+  // but the custom checker bypasses all default analysis.
+  TheCall->setType(Context.IntTy);
   return false;
 }
 
@@ -1038,7 +1041,8 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
     return ExprError();
   }
 
-  if (!IsC11 && !AtomTy.isTriviallyCopyableType(Context)) {
+  if (!IsC11 && !AtomTy.isTriviallyCopyableType(Context) &&
+      !AtomTy->isScalarType()) {
     // For GNU atomics, require a trivially-copyable type. This is not part of
     // the GNU atomics specification, but we enforce it for sanity.
     Diag(DRE->getLocStart(), diag::err_atomic_op_needs_trivial_copy)
@@ -1647,6 +1651,7 @@ bool Sema::SemaBuiltinVAStart(CallExpr *TheCall) {
     Diag(ParamLoc, diag::note_parameter_type) << Type;
   }
 
+  TheCall->setType(Context.VoidTy);
   return false;
 }
 
@@ -1815,6 +1820,37 @@ ExprResult Sema::SemaBuiltinShuffleVector(CallExpr *TheCall) {
   return Owned(new (Context) ShuffleVectorExpr(Context, exprs, resType,
                                             TheCall->getCallee()->getLocStart(),
                                             TheCall->getRParenLoc()));
+}
+
+/// SemaConvertVectorExpr - Handle __builtin_convertvector
+ExprResult Sema::SemaConvertVectorExpr(Expr *E, TypeSourceInfo *TInfo,
+                                       SourceLocation BuiltinLoc,
+                                       SourceLocation RParenLoc) {
+  ExprValueKind VK = VK_RValue;
+  ExprObjectKind OK = OK_Ordinary;
+  QualType DstTy = TInfo->getType();
+  QualType SrcTy = E->getType();
+
+  if (!SrcTy->isVectorType() && !SrcTy->isDependentType())
+    return ExprError(Diag(BuiltinLoc,
+                          diag::err_convertvector_non_vector)
+                     << E->getSourceRange());
+  if (!DstTy->isVectorType() && !DstTy->isDependentType())
+    return ExprError(Diag(BuiltinLoc,
+                          diag::err_convertvector_non_vector_type));
+
+  if (!SrcTy->isDependentType() && !DstTy->isDependentType()) {
+    unsigned SrcElts = SrcTy->getAs<VectorType>()->getNumElements();
+    unsigned DstElts = DstTy->getAs<VectorType>()->getNumElements();
+    if (SrcElts != DstElts)
+      return ExprError(Diag(BuiltinLoc,
+                            diag::err_convertvector_incompatible_vector)
+                       << E->getSourceRange());
+  }
+
+  return Owned(new (Context) ConvertVectorExpr(E, TInfo, DstTy, VK, OK,
+               BuiltinLoc, RParenLoc));
+
 }
 
 /// SemaBuiltinPrefetch - Handle __builtin_prefetch.
@@ -2091,6 +2127,27 @@ checkFormatStringExpr(Sema &S, const Expr *E, ArrayRef<const Expr *> Args,
 
     return SLCT_NotALiteral;
   }
+      
+  case Stmt::ObjCMessageExprClass: {
+    const ObjCMessageExpr *ME = cast<ObjCMessageExpr>(E);
+    if (const ObjCMethodDecl *MDecl = ME->getMethodDecl()) {
+      if (const NamedDecl *ND = dyn_cast<NamedDecl>(MDecl)) {
+        if (const FormatArgAttr *FA = ND->getAttr<FormatArgAttr>()) {
+          unsigned ArgIndex = FA->getFormatIdx();
+          if (ArgIndex <= ME->getNumArgs()) {
+            const Expr *Arg = ME->getArg(ArgIndex-1);
+            return checkFormatStringExpr(S, Arg, Args,
+                                         HasVAListArg, format_idx,
+                                         firstDataArg, Type, CallType,
+                                         InFunctionCall, CheckedVarArgs);
+          }
+        }
+      }
+    }
+
+    return SLCT_NotALiteral;
+  }
+      
   case Stmt::ObjCStringLiteralClass:
   case Stmt::StringLiteralClass: {
     const StringLiteral *StrE = NULL;
@@ -2141,7 +2198,7 @@ Sema::CheckNonNullArguments(const NonNullAttr *NonNull,
 }
 
 Sema::FormatStringType Sema::GetFormatStringType(const FormatAttr *Format) {
-  return llvm::StringSwitch<FormatStringType>(Format->getType())
+  return llvm::StringSwitch<FormatStringType>(Format->getType()->getName())
   .Case("scanf", FST_Scanf)
   .Cases("printf", "printf0", FST_Printf)
   .Cases("NSString", "CFString", FST_NSString)
@@ -3083,7 +3140,15 @@ CheckPrintfHandler::checkFormatExpr(const analyze_printf::PrintfSpecifier &FS,
       // 'unichar' is defined as a typedef of unsigned short, but we should
       // prefer using the typedef if it is visible.
       IntendedTy = S.Context.UnsignedShortTy;
-      
+
+      // While we are here, check if the value is an IntegerLiteral that happens
+      // to be within the valid range.
+      if (const IntegerLiteral *IL = dyn_cast<IntegerLiteral>(E)) {
+        const llvm::APInt &V = IL->getValue();
+        if (V.getActiveBits() <= S.Context.getTypeSize(IntendedTy))
+          return true;
+      }
+
       LookupResult Result(S, &S.Context.Idents.get("unichar"), E->getLocStart(),
                           Sema::LookupOrdinaryName);
       if (S.LookupName(Result, S.getCurScope())) {
@@ -4633,6 +4698,9 @@ static IntRange GetExprRange(ASTContext &C, Expr *E, unsigned MaxWidth) {
     }
   }
 
+  if (OpaqueValueExpr *OVE = dyn_cast<OpaqueValueExpr>(E))
+    return GetExprRange(C, OVE->getSourceExpr(), MaxWidth);
+
   if (FieldDecl *BitField = E->getSourceBitField())
     return IntRange(BitField->getBitWidthValue(C),
                     BitField->getType()->isUnsignedIntegerOrEnumerationType());
@@ -4712,6 +4780,10 @@ static bool HasEnumType(Expr *E) {
 }
 
 static void CheckTrivialUnsignedComparison(Sema &S, BinaryOperator *E) {
+  // Disable warning in template instantiations.
+  if (!S.ActiveTemplateInstantiations.empty())
+    return;
+
   BinaryOperatorKind op = E->getOpcode();
   if (E->isValueDependent())
     return;
@@ -4739,6 +4811,10 @@ static void DiagnoseOutOfRangeComparison(Sema &S, BinaryOperator *E,
                                          Expr *Constant, Expr *Other,
                                          llvm::APSInt Value,
                                          bool RhsConstant) {
+  // Disable warning in template instantiations.
+  if (!S.ActiveTemplateInstantiations.empty())
+    return;
+
   // 0 values are handled later by CheckTrivialUnsignedComparison().
   if (Value == 0)
     return;
@@ -5296,7 +5372,8 @@ void CheckImplicitConversion(Sema &S, Expr *E, QualType T,
     if (!Loc.isMacroID() || CC.isMacroID())
       S.Diag(Loc, diag::warn_impcast_null_pointer_to_integer)
           << T << clang::SourceRange(CC)
-          << FixItHint::CreateReplacement(Loc, S.getFixItZeroLiteralForType(T));
+          << FixItHint::CreateReplacement(Loc,
+                                          S.getFixItZeroLiteralForType(T, Loc));
   }
 
   if (!Source->isIntegerType() || !Target->isIntegerType())
@@ -5544,10 +5621,8 @@ void Sema::CheckImplicitConversions(Expr *E, SourceLocation CC) {
 /// Diagnose when expression is an integer constant expression and its evaluation
 /// results in integer overflow
 void Sema::CheckForIntOverflow (Expr *E) {
-  if (isa<BinaryOperator>(E->IgnoreParens())) {
-    SmallVector<PartialDiagnosticAt, 4> Diags;
-    E->EvaluateForOverflow(Context, &Diags);
-  }
+  if (isa<BinaryOperator>(E->IgnoreParens()))
+    E->EvaluateForOverflow(Context);
 }
 
 namespace {

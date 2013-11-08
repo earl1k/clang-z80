@@ -102,6 +102,7 @@ class Parser : public CodeCompletionHandler {
 
   /// Contextual keywords for Microsoft extensions.
   IdentifierInfo *Ident__except;
+  mutable IdentifierInfo *Ident_sealed;
 
   /// Ident_super - IdentifierInfo for "super", to support fast
   /// comparison.
@@ -608,6 +609,7 @@ private:
       assert(!isActive && "Forgot to call Commit or Revert!");
     }
   };
+  class UnannotatedTentativeParsingAction;
 
   /// ObjCDeclContextSwitch - An object used to switch context from
   /// an objective-c decl context to its enclosing decl context and
@@ -1061,6 +1063,11 @@ private:
   void DeallocateParsedClasses(ParsingClass *Class);
   void PopParsingClass(Sema::ParsingClassState);
 
+  enum CachedInitKind {
+    CIK_DefaultArgument,
+    CIK_DefaultInitializer
+  };
+
   NamedDecl *ParseCXXInlineMethodDef(AccessSpecifier AS,
                                 AttributeList *AccessAttrs,
                                 ParsingDeclarator &D,
@@ -1082,6 +1089,8 @@ private:
   void ParseLexedMemberInitializer(LateParsedMemberInitializer &MI);
   void ParseLexedObjCMethodDefs(LexedMethod &LM, bool parseMethod);
   bool ConsumeAndStoreFunctionPrologue(CachedTokens &Toks);
+  bool ConsumeAndStoreInitializer(CachedTokens &Toks, CachedInitKind CIK);
+  bool ConsumeAndStoreConditional(CachedTokens &Toks);
   bool ConsumeAndStoreUntil(tok::TokenKind T1,
                             CachedTokens &Toks,
                             bool StopAtSemi = true,
@@ -1461,10 +1470,7 @@ private:
   /// A SmallVector of types.
   typedef SmallVector<ParsedType, 12> TypeVector;
 
-  StmtResult ParseStatement(SourceLocation *TrailingElseLoc = 0) {
-    StmtVector Stmts;
-    return ParseStatementOrDeclaration(Stmts, true, TrailingElseLoc);
-  }
+  StmtResult ParseStatement(SourceLocation *TrailingElseLoc = 0);
   StmtResult ParseStatementOrDeclaration(StmtVector &Stmts,
                                          bool OnlyStatement,
                                          SourceLocation *TrailingElseLoc = 0);
@@ -1800,6 +1806,11 @@ private:
   isCXXDeclarationSpecifier(TPResult BracedCastResult = TPResult::False(),
                             bool *HasMissingTypename = 0);
 
+  /// Given that isCXXDeclarationSpecifier returns \c TPResult::True or
+  /// \c TPResult::Ambiguous, determine whether the decl-specifier would be
+  /// a type-specifier other than a cv-qualifier.
+  bool isCXXDeclarationSpecifierAType();
+
   /// \brief Determine whether an identifier has been tentatively declared as a
   /// non-type. Such tentative declarations should not be found to name a type
   /// during a tentative parse, but also should not be annotated as a non-type.
@@ -1812,15 +1823,18 @@ private:
   // that more tentative parsing is necessary for disambiguation.
   // They all consume tokens, so backtracking should be used after calling them.
 
-  TPResult TryParseDeclarationSpecifier(bool *HasMissingTypename = 0);
   TPResult TryParseSimpleDeclaration(bool AllowForRangeDecl);
   TPResult TryParseTypeofSpecifier();
   TPResult TryParseProtocolQualifiers();
+  TPResult TryParsePtrOperatorSeq();
+  TPResult TryParseOperatorId();
   TPResult TryParseInitDeclaratorList();
   TPResult TryParseDeclarator(bool mayBeAbstract, bool mayHaveIdentifier=true);
-  TPResult TryParseParameterDeclarationClause(bool *InvalidAsDeclaration = 0);
+  TPResult TryParseParameterDeclarationClause(bool *InvalidAsDeclaration = 0,
+                                              bool VersusTemplateArg = false);
   TPResult TryParseFunctionDeclarator();
   TPResult TryParseBracketDeclarator();
+  TPResult TryConsumeDeclarationSpecifier();
 
 public:
   TypeResult ParseTypeName(SourceRange *Range = 0,
@@ -1866,6 +1880,10 @@ private:
   // for example, attributes appertain to decl specifiers.
   void ProhibitCXX11Attributes(ParsedAttributesWithRange &attrs);
 
+  /// \brief Diagnose and skip C++11 attributes that appear in syntactic
+  /// locations where attributes are not allowed.
+  void DiagnoseAndSkipCXX11Attributes();
+
   void MaybeParseGNUAttributes(Declarator &D,
                                LateParsedAttrList *LateAttrs = 0) {
     if (Tok.is(tok::kw___attribute)) {
@@ -1891,6 +1909,7 @@ private:
                              IdentifierInfo *ScopeName,
                              SourceLocation ScopeLoc,
                              AttributeList::Syntax Syntax);
+  IdentifierLoc *ParseIdentifierLoc();
 
   void MaybeParseCXX11Attributes(Declarator &D) {
     if (getLangOpts().CPlusPlus11 && isCXX11AttributeSpecifier()) {
@@ -1960,6 +1979,11 @@ private:
                                         SourceLocation AttrNameLoc,
                                         ParsedAttributes &Attrs,
                                         SourceLocation *EndLoc);
+
+  void ParseAttributeWithTypeArg(IdentifierInfo &AttrName,
+                                 SourceLocation AttrNameLoc,
+                                 ParsedAttributes &Attrs,
+                                 SourceLocation *EndLoc);
 
   void ParseTypeofSpecifier(DeclSpec &DS);
   SourceLocation ParseDecltypeSpecifier(DeclSpec &DS);

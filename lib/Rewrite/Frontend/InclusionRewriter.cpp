@@ -110,7 +110,9 @@ void InclusionRewriter::WriteLineInfo(const char *Filename, int Line,
   if (!ShowLineMarkers)
     return;
   if (UseLineDirective) {
-    OS << "#line" << ' ' << Line << ' ' << '"' << Filename << '"';
+    OS << "#line" << ' ' << Line << ' ' << '"';
+    OS.write_escaped(Filename);
+    OS << '"';
   } else {
     // Use GNU linemarkers as described here:
     // http://gcc.gnu.org/onlinedocs/cpp/Preprocessor-Output.html
@@ -340,7 +342,7 @@ bool InclusionRewriter::HandleHasInclude(
   return true;
 }
 
-/// Use a raw lexer to analyze \p FileId, inccrementally copying parts of it
+/// Use a raw lexer to analyze \p FileId, incrementally copying parts of it
 /// and including content of included files recursively.
 bool InclusionRewriter::Process(FileID FileId,
                                 SrcMgr::CharacteristicKind FileType)

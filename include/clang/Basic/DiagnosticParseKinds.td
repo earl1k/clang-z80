@@ -23,6 +23,8 @@ def err_asm_empty : Error<"__asm used with no assembly instructions">;
 def err_inline_ms_asm_parsing : Error<"%0">;
 def err_msasm_unsupported_arch : Error<
   "Unsupported architecture '%0' for MS-style inline assembly">;
+def err_msasm_unable_to_create_target : Error<
+  "MS-style inline assembly is not available: %0">;
 }
 
 let CategoryName = "Parse Issue" in {
@@ -71,8 +73,6 @@ def ext_c99_variable_decl_in_for_loop : Extension<
   "variable declaration in for loop is a C99-specific feature">, InGroup<C99>;
 def ext_c99_compound_literal : Extension<
   "compound literals are a C99-specific feature">, InGroup<C99>;
-def ext_c99_flexible_array_member : Extension<
-  "Flexible array members are a C99-specific feature">, InGroup<C99>;
 def ext_enumerator_list_comma_c : Extension<
   "commas at the end of enumerator lists are a C99-specific "
   "feature">, InGroup<C99>;
@@ -167,10 +167,6 @@ def err_expected_member_name_or_semi : Error<
   "expected member name or ';' after declaration specifiers">;
 def err_function_declared_typedef : Error<
   "function definition declared 'typedef'">;
-def err_iboutletcollection_builtintype : Error<
-  "type argument of iboutletcollection attribute cannot be a builtin type">;
-def err_iboutletcollection_with_protocol : Error<
-  "invalid argument of iboutletcollection attribute">;
 def err_at_defs_cxx : Error<"@defs is not supported in Objective-C++">;
 def err_at_in_class : Error<"unexpected '@' in member specification">;
 
@@ -310,6 +306,8 @@ def err_unspecified_vla_size_with_static : Error<
 def warn_deprecated_register : Warning<
   "'register' storage class specifier is deprecated">,
   InGroup<DeprecatedRegister>;
+def err_expected_parentheses_around_typename : Error<
+  "expected parentheses around type name in %0 expression">;
 
 def err_expected_case_before_expression: Error<
   "expected 'case' keyword before expression">;
@@ -480,6 +478,8 @@ def err_expected_rbrace_or_comma : Error<"expected '}' or ','">;
 def err_expected_rsquare_or_comma : Error<"expected ']' or ','">;
 def err_using_namespace_in_class : Error<
   "'using namespace' is not allowed in classes">;
+def err_constructor_bad_name : Error<
+  "missing return type for function %0; did you mean the constructor name %1?">;
 def err_destructor_tilde_identifier : Error<
   "expected a class name after '~' to name a destructor">;
 def err_destructor_template_id : Error<
@@ -616,7 +616,7 @@ def warn_cxx98_compat_extern_template : Warning<
   InGroup<CXX98CompatPedantic>, DefaultIgnore;
 def warn_static_inline_explicit_inst_ignored : Warning<
   "ignoring '%select{static|inline}0' keyword on explicit template "
-  "instantiation">;
+  "instantiation">, InGroup<DiagGroup<"static-inline-explicit-instantiation">>;
   
 // Constructor template diagnostics.
 def err_out_of_line_constructor_template_id : Error<
@@ -700,6 +700,9 @@ def warn_cxx98_compat_override_control_keyword : Warning<
   InGroup<CXX98Compat>, DefaultIgnore;
 def err_override_control_interface : Error<
   "'%0' keyword not permitted with interface types">;
+def ext_ms_sealed_keyword : ExtWarn<
+  "'sealed' keyword is a Microsoft extension">,
+  InGroup<Microsoft>;
 
 def err_access_specifier_interface : Error<
   "interface types cannot specify '%select{private|protected}0' access">;

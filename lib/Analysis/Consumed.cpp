@@ -27,19 +27,20 @@
 #include "clang/Basic/OperatorKinds.h"
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/raw_ostream.h"
 
+// TODO: Use information from tests in while-loop conditional.
+// TODO: Add notes about the actual and expected state for 
 // TODO: Correctly identify unreachable blocks when chaining boolean operators.
+// TODO: Adjust the parser and AttributesList class to support lists of
+//       identifiers.
 // TODO: Warn about unreachable code.
 // TODO: Switch to using a bitmap to track unreachable blocks.
-// TODO: Mark variables as Unknown going into while- or for-loops only if they
-//       are referenced inside that block. (Deferred)
 // TODO: Handle variable definitions, e.g. bool valid = x.isValid();
 //       if (valid) ...; (Deferred)
-// TODO: Add a method(s) to identify which method calls perform what state
-//       transitions. (Deferred)
 // TODO: Take notes on state transitions to provide better warning messages.
 //       (Deferred)
 // TODO: Test nested conditionals: A) Checking the same value multiple times,
@@ -50,6 +51,50 @@ using namespace consumed;
 
 // Key method definition
 ConsumedWarningsHandlerBase::~ConsumedWarningsHandlerBase() {}
+
+static SourceLocation getFirstStmtLoc(const CFGBlock *Block) {
+  // Find the source location of the first statement in the block, if the block
+  // is not empty.
+  for (CFGBlock::const_iterator BI = Block->begin(), BE = Block->end();
+       BI != BE; ++BI) {
+    if (Optional<CFGStmt> CS = BI->getAs<CFGStmt>())
+      return CS->getStmt()->getLocStart();
+  }
+
+  // Block is empty.
+  // If we have one successor, return the first statement in that block
+  if (Block->succ_size() == 1 && *Block->succ_begin())
+    return getFirstStmtLoc(*Block->succ_begin());
+
+  return SourceLocation();
+}
+
+static SourceLocation getLastStmtLoc(const CFGBlock *Block) {
+  // Find the source location of the last statement in the block, if the block
+  // is not empty.
+  if (const Stmt *StmtNode = Block->getTerminator()) {
+    return StmtNode->getLocStart();
+  } else {
+    for (CFGBlock::const_reverse_iterator BI = Block->rbegin(),
+         BE = Block->rend(); BI != BE; ++BI) {
+      if (Optional<CFGStmt> CS = BI->getAs<CFGStmt>())
+        return CS->getStmt()->getLocStart();
+    }
+  }
+
+  // If we have one successor, return the first statement in that block
+  SourceLocation Loc;
+  if (Block->succ_size() == 1 && *Block->succ_begin())
+    Loc = getFirstStmtLoc(*Block->succ_begin());
+  if (Loc.isValid())
+    return Loc;
+
+  // If we have one predecessor, return the last statement in that block
+  if (Block->pred_size() == 1 && *Block->pred_begin())
+    return getLastStmtLoc(*Block->pred_begin());
+
+  return Loc;
+}
 
 static ConsumedState invertConsumedUnconsumed(ConsumedState State) {
   switch (State) {
@@ -65,11 +110,45 @@ static ConsumedState invertConsumedUnconsumed(ConsumedState State) {
   llvm_unreachable("invalid enum");
 }
 
+static bool isCallableInState(const CallableWhenAttr *CWAttr,
+                              ConsumedState State) {
+  
+  CallableWhenAttr::callableState_iterator I = CWAttr->callableState_begin(),
+                                           E = CWAttr->callableState_end();
+  
+  for (; I != E; ++I) {
+    
+    ConsumedState MappedAttrState = CS_None;
+    
+    switch (*I) {
+    case CallableWhenAttr::Unknown:
+      MappedAttrState = CS_Unknown;
+      break;
+      
+    case CallableWhenAttr::Unconsumed:
+      MappedAttrState = CS_Unconsumed;
+      break;
+      
+    case CallableWhenAttr::Consumed:
+      MappedAttrState = CS_Consumed;
+      break;
+    }
+    
+    if (MappedAttrState == State)
+      return true;
+  }
+  
+  return false;
+}
+
 static bool isConsumableType(const QualType &QT) {
+  if (QT->isPointerType() || QT->isReferenceType())
+    return false;
+  
   if (const CXXRecordDecl *RD = QT->getAsCXXRecordDecl())
     return RD->hasAttr<ConsumableAttr>();
-  else
-    return false;
+  
+  return false;
 }
 
 static bool isKnownState(ConsumedState State) {
@@ -84,8 +163,74 @@ static bool isKnownState(ConsumedState State) {
   llvm_unreachable("invalid enum");
 }
 
+static bool isRValueRefish(QualType ParamType) {
+  return ParamType->isRValueReferenceType() ||
+        (ParamType->isLValueReferenceType() &&
+         !cast<LValueReferenceType>(
+           ParamType.getCanonicalType())->isSpelledAsLValue());
+}
+
 static bool isTestingFunction(const FunctionDecl *FunDecl) {
-  return FunDecl->hasAttr<TestsUnconsumedAttr>();
+  return FunDecl->hasAttr<TestTypestateAttr>();
+}
+
+static bool isValueType(QualType ParamType) {
+  return !(ParamType->isPointerType() || ParamType->isReferenceType());
+}
+
+static ConsumedState mapConsumableAttrState(const QualType QT) {
+  assert(isConsumableType(QT));
+
+  const ConsumableAttr *CAttr =
+      QT->getAsCXXRecordDecl()->getAttr<ConsumableAttr>();
+
+  switch (CAttr->getDefaultState()) {
+  case ConsumableAttr::Unknown:
+    return CS_Unknown;
+  case ConsumableAttr::Unconsumed:
+    return CS_Unconsumed;
+  case ConsumableAttr::Consumed:
+    return CS_Consumed;
+  }
+  llvm_unreachable("invalid enum");
+}
+
+static ConsumedState
+mapParamTypestateAttrState(const ParamTypestateAttr *PTAttr) {
+  switch (PTAttr->getParamState()) {
+  case ParamTypestateAttr::Unknown:
+    return CS_Unknown;
+  case ParamTypestateAttr::Unconsumed:
+    return CS_Unconsumed;
+  case ParamTypestateAttr::Consumed:
+    return CS_Consumed;
+  }
+  llvm_unreachable("invalid_enum");
+}
+
+static ConsumedState
+mapReturnTypestateAttrState(const ReturnTypestateAttr *RTSAttr) {
+  switch (RTSAttr->getState()) {
+  case ReturnTypestateAttr::Unknown:
+    return CS_Unknown;
+  case ReturnTypestateAttr::Unconsumed:
+    return CS_Unconsumed;
+  case ReturnTypestateAttr::Consumed:
+    return CS_Consumed;
+  }
+  llvm_unreachable("invalid enum");
+}
+
+static ConsumedState mapSetTypestateAttrState(const SetTypestateAttr *STAttr) {
+  switch (STAttr->getNewState()) {
+  case SetTypestateAttr::Unknown:
+    return CS_Unknown;
+  case SetTypestateAttr::Unconsumed:
+    return CS_Unconsumed;
+  case SetTypestateAttr::Consumed:
+    return CS_Consumed;
+  }
+  llvm_unreachable("invalid_enum");
 }
 
 static StringRef stateToString(ConsumedState State) {
@@ -101,6 +246,17 @@ static StringRef stateToString(ConsumedState State) {
   
   case consumed::CS_Consumed:
     return "consumed";
+  }
+  llvm_unreachable("invalid enum");
+}
+
+static ConsumedState testsFor(const FunctionDecl *FunDecl) {
+  assert(isTestingFunction(FunDecl));
+  switch (FunDecl->getAttr<TestTypestateAttr>()->getTestState()) {
+  case TestTypestateAttr::Unconsumed:
+    return CS_Unconsumed;
+  case TestTypestateAttr::Consumed:
+    return CS_Consumed;
   }
   llvm_unreachable("invalid enum");
 }
@@ -143,6 +299,8 @@ class PropagationInfo {
     BinTestTy BinTest;
   };
   
+  QualType TempType;
+  
 public:
   PropagationInfo() : InfoType(IT_None) {}
   
@@ -177,12 +335,19 @@ public:
     BinTest.RTest.TestsFor = RTestsFor;
   }
   
-  PropagationInfo(ConsumedState State) : InfoType(IT_State), State(State) {}
+  PropagationInfo(ConsumedState State, QualType TempType)
+    : InfoType(IT_State), State(State), TempType(TempType) {}
+  
   PropagationInfo(const VarDecl *Var) : InfoType(IT_Var), Var(Var) {}
   
   const ConsumedState & getState() const {
     assert(InfoType == IT_State);
     return State;
+  }
+  
+  const QualType & getTempType() const {
+    assert(InfoType == IT_State);
+    return TempType;
   }
   
   const VarTestResult & getTest() const {
@@ -249,21 +414,31 @@ class ConsumedStmtVisitor : public ConstStmtVisitor<ConsumedStmtVisitor> {
   ConsumedAnalyzer &Analyzer;
   ConsumedStateMap *StateMap;
   MapType PropagationMap;
+  void forwardInfo(const Stmt *From, const Stmt *To);
+  bool isLikeMoveAssignment(const CXXMethodDecl *MethodDecl);
+  void propagateReturnType(const Stmt *Call, const FunctionDecl *Fun,
+                           QualType ReturnType);
   
+  inline ConsumedState getPInfoState(const PropagationInfo& PInfo) {
+    if (PInfo.isVar())
+      return StateMap->getState(PInfo.getVar());
+    else if (PInfo.isState())
+      return PInfo.getState();
+    else
+      return CS_None;
+  }
+
+public:
   void checkCallability(const PropagationInfo &PInfo,
                         const FunctionDecl *FunDecl,
-                        const CallExpr *Call);
-  void forwardInfo(const Stmt *From, const Stmt *To);
-  void handleTestingFunctionCall(const CallExpr *Call, const VarDecl *Var);
-  bool isLikeMoveAssignment(const CXXMethodDecl *MethodDecl);
-  
-public:
+                        SourceLocation BlameLoc);
 
   void Visit(const Stmt *StmtNode);
   
   void VisitBinaryOperator(const BinaryOperator *BinOp);
   void VisitCallExpr(const CallExpr *Call);
   void VisitCastExpr(const CastExpr *Cast);
+  void VisitCXXBindTemporaryExpr(const CXXBindTemporaryExpr *Temp);
   void VisitCXXConstructExpr(const CXXConstructExpr *Call);
   void VisitCXXMemberCallExpr(const CXXMemberCallExpr *Call);
   void VisitCXXOperatorCallExpr(const CXXOperatorCallExpr *Call);
@@ -272,6 +447,7 @@ public:
   void VisitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *Temp);
   void VisitMemberExpr(const MemberExpr *MExpr);
   void VisitParmVarDecl(const ParmVarDecl *Param);
+  void VisitReturnStmt(const ReturnStmt *Ret);
   void VisitUnaryOperator(const UnaryOperator *UOp);
   void VisitVarDecl(const VarDecl *Var);
 
@@ -293,51 +469,37 @@ public:
   }
 };
 
-// TODO: When we support CallableWhenConsumed this will have to check for
-//       the different attributes and change the behavior bellow. (Deferred)
 void ConsumedStmtVisitor::checkCallability(const PropagationInfo &PInfo,
                                            const FunctionDecl *FunDecl,
-                                           const CallExpr *Call) {
+                                           SourceLocation BlameLoc) {
   
-  if (!FunDecl->hasAttr<CallableWhenUnconsumedAttr>()) return;
+  if (!FunDecl->hasAttr<CallableWhenAttr>())
+    return;
+  
+  const CallableWhenAttr *CWAttr = FunDecl->getAttr<CallableWhenAttr>();
   
   if (PInfo.isVar()) {
     const VarDecl *Var = PInfo.getVar();
+    ConsumedState VarState = StateMap->getState(Var);
     
-    switch (StateMap->getState(Var)) {
-    case CS_Consumed:
-      Analyzer.WarningsHandler.warnUseWhileConsumed(
-        FunDecl->getNameAsString(), Var->getNameAsString(),
-        Call->getExprLoc());
-      break;
+    assert(VarState != CS_None && "Invalid state");
     
-    case CS_Unknown:
-      Analyzer.WarningsHandler.warnUseInUnknownState(
-        FunDecl->getNameAsString(), Var->getNameAsString(),
-        Call->getExprLoc());
-      break;
-      
-    case CS_None:
-    case CS_Unconsumed:
-      break;
-    }
+    if (isCallableInState(CWAttr, VarState))
+      return;
     
-  } else {
-    switch (PInfo.getState()) {
-    case CS_Consumed:
-      Analyzer.WarningsHandler.warnUseOfTempWhileConsumed(
-        FunDecl->getNameAsString(), Call->getExprLoc());
-      break;
+    Analyzer.WarningsHandler.warnUseInInvalidState(
+      FunDecl->getNameAsString(), Var->getNameAsString(),
+      stateToString(VarState), BlameLoc);
     
-    case CS_Unknown:
-      Analyzer.WarningsHandler.warnUseOfTempInUnknownState(
-        FunDecl->getNameAsString(), Call->getExprLoc());
-      break;
-      
-    case CS_None:
-    case CS_Unconsumed:
-      break;
-    }
+  } else if (PInfo.isState()) {
+    
+    assert(PInfo.getState() != CS_None && "Invalid state");
+    
+    if (isCallableInState(CWAttr, PInfo.getState()))
+      return;
+    
+    Analyzer.WarningsHandler.warnUseOfTempInInvalidState(
+      FunDecl->getNameAsString(), stateToString(PInfo.getState()), BlameLoc);
   }
 }
 
@@ -348,22 +510,6 @@ void ConsumedStmtVisitor::forwardInfo(const Stmt *From, const Stmt *To) {
     PropagationMap.insert(PairType(To, Entry->second));
 }
 
-void ConsumedStmtVisitor::handleTestingFunctionCall(const CallExpr *Call,
-                                                    const VarDecl  *Var) {
-  
-  ConsumedState VarState = StateMap->getState(Var);
-  
-  if (VarState != CS_Unknown) {
-    SourceLocation CallLoc = Call->getExprLoc();
-    
-    if (!CallLoc.isMacroID())
-      Analyzer.WarningsHandler.warnUnnecessaryTest(Var->getNameAsString(),
-        stateToString(VarState), CallLoc);
-  }
-  
-  PropagationMap.insert(PairType(Call, PropagationInfo(Var, CS_Unconsumed)));
-}
-
 bool ConsumedStmtVisitor::isLikeMoveAssignment(
   const CXXMethodDecl *MethodDecl) {
   
@@ -371,6 +517,24 @@ bool ConsumedStmtVisitor::isLikeMoveAssignment(
          (MethodDecl->getOverloadedOperator() == OO_Equal &&
           MethodDecl->getNumParams() == 1 &&
           MethodDecl->getParamDecl(0)->getType()->isRValueReferenceType());
+}
+
+void ConsumedStmtVisitor::propagateReturnType(const Stmt *Call,
+                                              const FunctionDecl *Fun,
+                                              QualType ReturnType) {
+  if (isConsumableType(ReturnType)) {
+    
+    ConsumedState ReturnState;
+    
+    if (Fun->hasAttr<ReturnTypestateAttr>())
+      ReturnState = mapReturnTypestateAttrState(
+        Fun->getAttr<ReturnTypestateAttr>());
+    else
+      ReturnState = mapConsumableAttrState(ReturnType);
+    
+    PropagationMap.insert(PairType(Call,
+      PropagationInfo(ReturnState, ReturnType)));
+  }
 }
 
 void ConsumedStmtVisitor::Visit(const Stmt *StmtNode) {
@@ -433,47 +597,75 @@ void ConsumedStmtVisitor::VisitCallExpr(const CallExpr *Call) {
     // Special case for the std::move function.
     // TODO: Make this more specific. (Deferred)
     if (FunDecl->getNameAsString() == "move") {
-      InfoEntry Entry = PropagationMap.find(Call->getArg(0));
-      
-      if (Entry != PropagationMap.end()) {
-        PropagationMap.insert(PairType(Call, Entry->second));
-      }
-      
+      forwardInfo(Call->getArg(0), Call);
       return;
     }
     
     unsigned Offset = Call->getNumArgs() - FunDecl->getNumParams();
     
     for (unsigned Index = Offset; Index < Call->getNumArgs(); ++Index) {
-      QualType ParamType = FunDecl->getParamDecl(Index - Offset)->getType();
+      const ParmVarDecl *Param = FunDecl->getParamDecl(Index - Offset);
+      QualType ParamType = Param->getType();
       
       InfoEntry Entry = PropagationMap.find(Call->getArg(Index));
       
-      if (Entry == PropagationMap.end() || !Entry->second.isVar()) {
+      if (Entry == PropagationMap.end() ||
+          !(Entry->second.isState() || Entry->second.isVar()))
         continue;
-      }
       
       PropagationInfo PInfo = Entry->second;
       
-      if (ParamType->isRValueReferenceType() ||
-          (ParamType->isLValueReferenceType() &&
-           !cast<LValueReferenceType>(*ParamType).isSpelledAsLValue())) {
+      // Check that the parameter is in the correct state.
+      
+      if (Param->hasAttr<ParamTypestateAttr>()) {
+        ConsumedState ParamState =
+          PInfo.isState() ? PInfo.getState() :
+                            StateMap->getState(PInfo.getVar());
         
+        ConsumedState ExpectedState =
+          mapParamTypestateAttrState(Param->getAttr<ParamTypestateAttr>());
+        
+        if (ParamState != ExpectedState)
+          Analyzer.WarningsHandler.warnParamTypestateMismatch(
+            Call->getArg(Index - Offset)->getExprLoc(),
+            stateToString(ExpectedState), stateToString(ParamState));
+      }
+      
+      if (!Entry->second.isVar())
+        continue;
+      
+      // Adjust state on the caller side.
+      
+      if (isRValueRefish(ParamType)) {
         StateMap->setState(PInfo.getVar(), consumed::CS_Consumed);
         
-      } else if (!(ParamType.isConstQualified() ||
-                   ((ParamType->isReferenceType() ||
-                     ParamType->isPointerType()) &&
-                    ParamType->getPointeeType().isConstQualified()))) {
+      } else if (Param->hasAttr<ReturnTypestateAttr>()) {
+        StateMap->setState(PInfo.getVar(),
+          mapReturnTypestateAttrState(Param->getAttr<ReturnTypestateAttr>()));
+        
+      } else if (!isValueType(ParamType) &&
+                 !ParamType->getPointeeType().isConstQualified()) {
         
         StateMap->setState(PInfo.getVar(), consumed::CS_Unknown);
       }
     }
+    
+    QualType RetType = FunDecl->getCallResultType();
+    if (RetType->isReferenceType())
+      RetType = RetType->getPointeeType();
+    
+    propagateReturnType(Call, FunDecl, RetType);
   }
 }
 
 void ConsumedStmtVisitor::VisitCastExpr(const CastExpr *Cast) {
   forwardInfo(Cast->getSubExpr(), Cast);
+}
+
+void ConsumedStmtVisitor::VisitCXXBindTemporaryExpr(
+  const CXXBindTemporaryExpr *Temp) {
+  
+  forwardInfo(Temp->getSubExpr(), Temp);
 }
 
 void ConsumedStmtVisitor::VisitCXXConstructExpr(const CXXConstructExpr *Call) {
@@ -482,40 +674,45 @@ void ConsumedStmtVisitor::VisitCXXConstructExpr(const CXXConstructExpr *Call) {
   ASTContext &CurrContext = AC.getASTContext();
   QualType ThisType = Constructor->getThisType(CurrContext)->getPointeeType();
   
-  if (isConsumableType(ThisType)) {
-    if (Constructor->hasAttr<ConsumesAttr>() ||
-        Constructor->isDefaultConstructor()) {
-      
-      PropagationMap.insert(PairType(Call,
-        PropagationInfo(consumed::CS_Consumed)));
-      
-    } else if (Constructor->isMoveConstructor()) {
-      
-      PropagationInfo PInfo =
-        PropagationMap.find(Call->getArg(0))->second;
+  if (!isConsumableType(ThisType))
+    return;
+  
+  // FIXME: What should happen if someone annotates the move constructor?
+  if (Constructor->hasAttr<ReturnTypestateAttr>()) {
+    ReturnTypestateAttr *RTAttr = Constructor->getAttr<ReturnTypestateAttr>();
+    ConsumedState RetState = mapReturnTypestateAttrState(RTAttr);
+    PropagationMap.insert(PairType(Call, PropagationInfo(RetState, ThisType)));
+    
+  } else if (Constructor->isDefaultConstructor()) {
+    
+    PropagationMap.insert(PairType(Call,
+      PropagationInfo(consumed::CS_Consumed, ThisType)));
+    
+  } else if (Constructor->isMoveConstructor()) {
+    
+    InfoEntry Entry = PropagationMap.find(Call->getArg(0));
+    
+    if (Entry != PropagationMap.end()) {
+      PropagationInfo PInfo = Entry->second;
       
       if (PInfo.isVar()) {
         const VarDecl* Var = PInfo.getVar();
         
         PropagationMap.insert(PairType(Call,
-          PropagationInfo(StateMap->getState(Var))));
+          PropagationInfo(StateMap->getState(Var), ThisType)));
         
         StateMap->setState(Var, consumed::CS_Consumed);
         
       } else {
         PropagationMap.insert(PairType(Call, PInfo));
       }
-        
-    } else if (Constructor->isCopyConstructor()) {
-      MapType::iterator Entry = PropagationMap.find(Call->getArg(0));
-    
-      if (Entry != PropagationMap.end())
-        PropagationMap.insert(PairType(Call, Entry->second));
-      
-    } else {
-      PropagationMap.insert(PairType(Call,
-        PropagationInfo(consumed::CS_Unconsumed)));
     }
+  } else if (Constructor->isCopyConstructor()) {
+    forwardInfo(Call->getArg(0), Call);
+    
+  } else {
+    ConsumedState RetState = mapConsumableAttrState(ThisType);
+    PropagationMap.insert(PairType(Call, PropagationInfo(RetState, ThisType)));
   }
 }
 
@@ -530,13 +727,15 @@ void ConsumedStmtVisitor::VisitCXXMemberCallExpr(
     PropagationInfo PInfo = Entry->second;
     const CXXMethodDecl *MethodDecl = Call->getMethodDecl();
     
-    checkCallability(PInfo, MethodDecl, Call);
+    checkCallability(PInfo, MethodDecl, Call->getExprLoc());
     
     if (PInfo.isVar()) {
       if (isTestingFunction(MethodDecl))
-        handleTestingFunctionCall(Call, PInfo.getVar());
-      else if (MethodDecl->hasAttr<ConsumesAttr>())
-        StateMap->setState(PInfo.getVar(), consumed::CS_Consumed);
+        PropagationMap.insert(PairType(Call,
+          PropagationInfo(PInfo.getVar(), testsFor(MethodDecl))));
+      else if (MethodDecl->hasAttr<SetTypestateAttr>())
+        StateMap->setState(PInfo.getVar(),
+          mapSetTypestateAttrState(MethodDecl->getAttr<SetTypestateAttr>()));
     }
   }
 }
@@ -578,7 +777,8 @@ void ConsumedStmtVisitor::VisitCXXOperatorCallExpr(
         
       } else if (!LPInfo.isVar() && RPInfo.isVar()) {
         PropagationMap.insert(PairType(Call,
-          PropagationInfo(StateMap->getState(RPInfo.getVar()))));
+          PropagationInfo(StateMap->getState(RPInfo.getVar()),
+                          LPInfo.getTempType())));
         
         StateMap->setState(RPInfo.getVar(), consumed::CS_Consumed);
         
@@ -596,27 +796,16 @@ void ConsumedStmtVisitor::VisitCXXOperatorCallExpr(
         
         PropagationMap.insert(PairType(Call, LPInfo));
         
-      } else {
+      } else if (LPInfo.isState()) {
         PropagationMap.insert(PairType(Call,
-          PropagationInfo(consumed::CS_Unknown)));
+          PropagationInfo(consumed::CS_Unknown, LPInfo.getTempType())));
       }
       
     } else if (LEntry == PropagationMap.end() &&
                REntry != PropagationMap.end()) {
       
-      RPInfo = REntry->second;
-      
-      if (RPInfo.isVar()) {
-        const VarDecl *Var = RPInfo.getVar();
-        
-        PropagationMap.insert(PairType(Call,
-          PropagationInfo(StateMap->getState(Var))));
-        
-        StateMap->setState(Var, consumed::CS_Consumed);
-        
-      } else {
-        PropagationMap.insert(PairType(Call, RPInfo));
-      }
+      if (REntry->second.isVar())
+        StateMap->setState(REntry->second.getVar(), consumed::CS_Consumed);
     }
     
   } else {
@@ -628,13 +817,15 @@ void ConsumedStmtVisitor::VisitCXXOperatorCallExpr(
     if (Entry != PropagationMap.end()) {
       PropagationInfo PInfo = Entry->second;
       
-      checkCallability(PInfo, FunDecl, Call);
+      checkCallability(PInfo, FunDecl, Call->getExprLoc());
       
       if (PInfo.isVar()) {
         if (isTestingFunction(FunDecl))
-          handleTestingFunctionCall(Call, PInfo.getVar());
-        else if (FunDecl->hasAttr<ConsumesAttr>())
-          StateMap->setState(PInfo.getVar(), consumed::CS_Consumed);
+          PropagationMap.insert(PairType(Call,
+            PropagationInfo(PInfo.getVar(), testsFor(FunDecl))));
+        else if (FunDecl->hasAttr<SetTypestateAttr>())
+          StateMap->setState(PInfo.getVar(),
+            mapSetTypestateAttrState(FunDecl->getAttr<SetTypestateAttr>()));
       }
     }
   }
@@ -661,10 +852,7 @@ void ConsumedStmtVisitor::VisitDeclStmt(const DeclStmt *DeclS) {
 void ConsumedStmtVisitor::VisitMaterializeTemporaryExpr(
   const MaterializeTemporaryExpr *Temp) {
   
-  InfoEntry Entry = PropagationMap.find(Temp->GetTemporaryExpr());
-  
-  if (Entry != PropagationMap.end())
-    PropagationMap.insert(PairType(Temp, Entry->second));
+  forwardInfo(Temp->GetTemporaryExpr(), Temp);
 }
 
 void ConsumedStmtVisitor::VisitMemberExpr(const MemberExpr *MExpr) {
@@ -673,8 +861,51 @@ void ConsumedStmtVisitor::VisitMemberExpr(const MemberExpr *MExpr) {
 
 
 void ConsumedStmtVisitor::VisitParmVarDecl(const ParmVarDecl *Param) {
-  if (isConsumableType(Param->getType()))
-    StateMap->setState(Param, consumed::CS_Unknown);
+  QualType ParamType = Param->getType();
+  ConsumedState ParamState = consumed::CS_None;
+  
+  if (Param->hasAttr<ParamTypestateAttr>()) {
+    const ParamTypestateAttr *PTAttr = Param->getAttr<ParamTypestateAttr>();
+    ParamState = mapParamTypestateAttrState(PTAttr);
+    
+  } else if (isConsumableType(ParamType)) {
+    ParamState = mapConsumableAttrState(ParamType);
+    
+  } else if (isRValueRefish(ParamType) &&
+             isConsumableType(ParamType->getPointeeType())) {
+    
+    ParamState = mapConsumableAttrState(ParamType->getPointeeType());
+    
+  } else if (ParamType->isReferenceType() &&
+             isConsumableType(ParamType->getPointeeType())) {
+    ParamState = consumed::CS_Unknown;
+  }
+  
+  if (ParamState != CS_None)
+    StateMap->setState(Param, ParamState);
+}
+
+void ConsumedStmtVisitor::VisitReturnStmt(const ReturnStmt *Ret) {
+  ConsumedState ExpectedState = Analyzer.getExpectedReturnState();
+  
+  if (ExpectedState != CS_None) {
+    InfoEntry Entry = PropagationMap.find(Ret->getRetValue());
+    
+    if (Entry != PropagationMap.end()) {
+      assert(Entry->second.isState() || Entry->second.isVar());
+       
+      ConsumedState RetState = Entry->second.isState() ?
+        Entry->second.getState() : StateMap->getState(Entry->second.getVar());
+        
+      if (RetState != ExpectedState)
+        Analyzer.WarningsHandler.warnReturnTypestateMismatch(
+          Ret->getReturnLoc(), stateToString(ExpectedState),
+          stateToString(RetState));
+    }
+  }
+  
+  StateMap->checkParamsForReturnTypestate(Ret->getLocStart(),
+                                          Analyzer.WarningsHandler);
 }
 
 void ConsumedStmtVisitor::VisitUnaryOperator(const UnaryOperator *UOp) {
@@ -696,18 +927,22 @@ void ConsumedStmtVisitor::VisitUnaryOperator(const UnaryOperator *UOp) {
   }
 }
 
+// TODO: See if I need to check for reference types here.
 void ConsumedStmtVisitor::VisitVarDecl(const VarDecl *Var) {
   if (isConsumableType(Var->getType())) {
     if (Var->hasInit()) {
-      PropagationInfo PInfo =
-        PropagationMap.find(Var->getInit())->second;
-      
-      StateMap->setState(Var, PInfo.isVar() ?
-        StateMap->getState(PInfo.getVar()) : PInfo.getState());
-      
-    } else {
-      StateMap->setState(Var, consumed::CS_Unknown);
+      MapType::iterator VIT = PropagationMap.find(Var->getInit());
+      if (VIT != PropagationMap.end()) {
+        PropagationInfo PInfo = VIT->second;
+        ConsumedState St = getPInfoState(PInfo);
+        if (St != consumed::CS_None) {
+          StateMap->setState(Var, St);
+          return;
+        }
+      }
     }
+    // Otherwise
+    StateMap->setState(Var, consumed::CS_Unknown);
   }
 }
 }} // end clang::consumed::ConsumedStmtVisitor
@@ -723,13 +958,12 @@ void splitVarStateForIf(const IfStmt * IfNode, const VarTestResult &Test,
   
   if (VarState == CS_Unknown) {
     ThenStates->setState(Test.Var, Test.TestsFor);
-    if (ElseStates)
-      ElseStates->setState(Test.Var, invertConsumedUnconsumed(Test.TestsFor));
+    ElseStates->setState(Test.Var, invertConsumedUnconsumed(Test.TestsFor));
   
   } else if (VarState == invertConsumedUnconsumed(Test.TestsFor)) {
     ThenStates->markUnreachable();
     
-  } else if (VarState == Test.TestsFor && ElseStates) {
+  } else if (VarState == Test.TestsFor) {
     ElseStates->markUnreachable();
   }
 }
@@ -752,31 +986,27 @@ void splitVarStateForIfBinOp(const PropagationInfo &PInfo,
         ThenStates->markUnreachable();
         
       } else if (LState == LTest.TestsFor && isKnownState(RState)) {
-        if (RState == RTest.TestsFor) {
-          if (ElseStates)
-            ElseStates->markUnreachable();
-        } else {
+        if (RState == RTest.TestsFor)
+          ElseStates->markUnreachable();
+        else
           ThenStates->markUnreachable();
-        }
       }
       
     } else {
-      if (LState == CS_Unknown && ElseStates) {
+      if (LState == CS_Unknown) {
         ElseStates->setState(LTest.Var,
                              invertConsumedUnconsumed(LTest.TestsFor));
       
-      } else if (LState == LTest.TestsFor && ElseStates) {
+      } else if (LState == LTest.TestsFor) {
         ElseStates->markUnreachable();
         
       } else if (LState == invertConsumedUnconsumed(LTest.TestsFor) &&
                  isKnownState(RState)) {
         
-        if (RState == RTest.TestsFor) {
-          if (ElseStates)
-            ElseStates->markUnreachable();
-        } else {
+        if (RState == RTest.TestsFor)
+          ElseStates->markUnreachable();
+        else
           ThenStates->markUnreachable();
-        }
       }
     }
   }
@@ -788,7 +1018,7 @@ void splitVarStateForIfBinOp(const PropagationInfo &PInfo,
       else if (RState == invertConsumedUnconsumed(RTest.TestsFor))
         ThenStates->markUnreachable();
       
-    } else if (ElseStates) {
+    } else {
       if (RState == CS_Unknown)
         ElseStates->setState(RTest.Var,
                              invertConsumedUnconsumed(RTest.TestsFor));
@@ -798,11 +1028,26 @@ void splitVarStateForIfBinOp(const PropagationInfo &PInfo,
   }
 }
 
+bool ConsumedBlockInfo::allBackEdgesVisited(const CFGBlock *CurrBlock,
+                                            const CFGBlock *TargetBlock) {
+  
+  assert(CurrBlock && "Block pointer must not be NULL");
+  assert(TargetBlock && "TargetBlock pointer must not be NULL");
+  
+  unsigned int CurrBlockOrder = VisitOrder[CurrBlock->getBlockID()];
+  for (CFGBlock::const_pred_iterator PI = TargetBlock->pred_begin(),
+       PE = TargetBlock->pred_end(); PI != PE; ++PI) {
+    if (*PI && CurrBlockOrder < VisitOrder[(*PI)->getBlockID()] )
+      return false;
+  }
+  return true;
+}
+
 void ConsumedBlockInfo::addInfo(const CFGBlock *Block,
                                 ConsumedStateMap *StateMap,
                                 bool &AlreadyOwned) {
   
-  if (VisitedBlocks.alreadySet(Block)) return;
+  assert(Block && "Block pointer must not be NULL");
   
   ConsumedStateMap *Entry = StateMapsArray[Block->getBlockID()];
     
@@ -821,10 +1066,7 @@ void ConsumedBlockInfo::addInfo(const CFGBlock *Block,
 void ConsumedBlockInfo::addInfo(const CFGBlock *Block,
                                 ConsumedStateMap *StateMap) {
   
-  if (VisitedBlocks.alreadySet(Block)) {
-    delete StateMap;
-    return;
-  }
+  assert(Block != NULL && "Block pointer must not be NULL");
   
   ConsumedStateMap *Entry = StateMapsArray[Block->getBlockID()];
     
@@ -837,15 +1079,81 @@ void ConsumedBlockInfo::addInfo(const CFGBlock *Block,
   }
 }
 
-ConsumedStateMap* ConsumedBlockInfo::getInfo(const CFGBlock *Block) {
+ConsumedStateMap* ConsumedBlockInfo::borrowInfo(const CFGBlock *Block) {
+  assert(Block && "Block pointer must not be NULL");
+  assert(StateMapsArray[Block->getBlockID()] && "Block has no block info");
+  
   return StateMapsArray[Block->getBlockID()];
 }
 
-void ConsumedBlockInfo::markVisited(const CFGBlock *Block) {
-  VisitedBlocks.insert(Block);
+void ConsumedBlockInfo::discardInfo(const CFGBlock *Block) {
+  unsigned int BlockID = Block->getBlockID();
+  delete StateMapsArray[BlockID];
+  StateMapsArray[BlockID] = NULL;
 }
 
-ConsumedState ConsumedStateMap::getState(const VarDecl *Var) {
+ConsumedStateMap* ConsumedBlockInfo::getInfo(const CFGBlock *Block) {
+  assert(Block && "Block pointer must not be NULL");
+  
+  ConsumedStateMap *StateMap = StateMapsArray[Block->getBlockID()];
+  if (isBackEdgeTarget(Block)) {
+    return new ConsumedStateMap(*StateMap);
+  } else {
+    StateMapsArray[Block->getBlockID()] = NULL;
+    return StateMap;
+  }
+}
+
+bool ConsumedBlockInfo::isBackEdge(const CFGBlock *From, const CFGBlock *To) {
+  assert(From && "From block must not be NULL");
+  assert(To   && "From block must not be NULL");
+  
+  return VisitOrder[From->getBlockID()] > VisitOrder[To->getBlockID()];
+}
+
+bool ConsumedBlockInfo::isBackEdgeTarget(const CFGBlock *Block) {
+  assert(Block != NULL && "Block pointer must not be NULL");
+  
+  // Anything with less than two predecessors can't be the target of a back
+  // edge.
+  if (Block->pred_size() < 2)
+    return false;
+  
+  unsigned int BlockVisitOrder = VisitOrder[Block->getBlockID()];
+  for (CFGBlock::const_pred_iterator PI = Block->pred_begin(),
+       PE = Block->pred_end(); PI != PE; ++PI) {
+    if (*PI && BlockVisitOrder < VisitOrder[(*PI)->getBlockID()])
+      return true;
+  }
+  return false;
+}
+
+void ConsumedStateMap::checkParamsForReturnTypestate(SourceLocation BlameLoc,
+  ConsumedWarningsHandlerBase &WarningsHandler) const {
+  
+  ConsumedState ExpectedState;
+  
+  for (MapType::const_iterator DMI = Map.begin(), DME = Map.end(); DMI != DME;
+       ++DMI) {
+    
+    if (isa<ParmVarDecl>(DMI->first)) {
+      const ParmVarDecl *Param = cast<ParmVarDecl>(DMI->first);
+      
+      if (!Param->hasAttr<ReturnTypestateAttr>()) continue;
+      
+      ExpectedState =
+        mapReturnTypestateAttrState(Param->getAttr<ReturnTypestateAttr>());
+      
+      if (DMI->second != ExpectedState) {
+        WarningsHandler.warnParamReturnTypestateMismatch(BlameLoc,
+          Param->getNameAsString(), stateToString(ExpectedState),
+          stateToString(DMI->second));
+      }
+    }
+  }
+}
+
+ConsumedState ConsumedStateMap::getState(const VarDecl *Var) const {
   MapType::const_iterator Entry = Map.find(Var);
   
   if (Entry != Map.end()) {
@@ -864,8 +1172,8 @@ void ConsumedStateMap::intersect(const ConsumedStateMap *Other) {
     return;
   }
   
-  for (MapType::const_iterator DMI = Other->Map.begin(),
-       DME = Other->Map.end(); DMI != DME; ++DMI) {
+  for (MapType::const_iterator DMI = Other->Map.begin(), DME = Other->Map.end();
+       DMI != DME; ++DMI) {
     
     LocalState = this->getState(DMI->first);
     
@@ -877,17 +1185,32 @@ void ConsumedStateMap::intersect(const ConsumedStateMap *Other) {
   }
 }
 
+void ConsumedStateMap::intersectAtLoopHead(const CFGBlock *LoopHead,
+  const CFGBlock *LoopBack, const ConsumedStateMap *LoopBackStates,
+  ConsumedWarningsHandlerBase &WarningsHandler) {
+  
+  ConsumedState LocalState;
+  SourceLocation BlameLoc = getLastStmtLoc(LoopBack);
+  
+  for (MapType::const_iterator DMI = LoopBackStates->Map.begin(),
+       DME = LoopBackStates->Map.end(); DMI != DME; ++DMI) {
+    
+    LocalState = this->getState(DMI->first);
+    
+    if (LocalState == CS_None)
+      continue;
+    
+    if (LocalState != DMI->second) {
+      Map[DMI->first] = CS_Unknown;
+      WarningsHandler.warnLoopStateMismatch(
+        BlameLoc, DMI->first->getNameAsString());
+    }
+  }
+}
+
 void ConsumedStateMap::markUnreachable() {
   this->Reachable = false;
   Map.clear();
-}
-
-void ConsumedStateMap::makeUnknown() {
-  for (MapType::const_iterator DMI = Map.begin(), DME = Map.end(); DMI != DME;
-       ++DMI) {
-    
-    Map[DMI->first] = CS_Unknown;
-  }
 }
 
 void ConsumedStateMap::setState(const VarDecl *Var, ConsumedState State) {
@@ -898,16 +1221,55 @@ void ConsumedStateMap::remove(const VarDecl *Var) {
   Map.erase(Var);
 }
 
+bool ConsumedStateMap::operator!=(const ConsumedStateMap *Other) const {
+  for (MapType::const_iterator DMI = Other->Map.begin(), DME = Other->Map.end();
+       DMI != DME; ++DMI) {
+    
+    if (this->getState(DMI->first) != DMI->second)
+      return true;
+  }
+  
+  return false;
+}
+
+void ConsumedAnalyzer::determineExpectedReturnState(AnalysisDeclContext &AC,
+                                                    const FunctionDecl *D) {
+  QualType ReturnType;
+  if (const CXXConstructorDecl *Constructor = dyn_cast<CXXConstructorDecl>(D)) {
+    ASTContext &CurrContext = AC.getASTContext();
+    ReturnType = Constructor->getThisType(CurrContext)->getPointeeType();
+  } else
+    ReturnType = D->getCallResultType();
+
+  if (D->hasAttr<ReturnTypestateAttr>()) {
+    const ReturnTypestateAttr *RTSAttr = D->getAttr<ReturnTypestateAttr>();
+
+    const CXXRecordDecl *RD = ReturnType->getAsCXXRecordDecl();
+    if (!RD || !RD->hasAttr<ConsumableAttr>()) {
+      // FIXME: This should be removed when template instantiation propagates
+      //        attributes at template specialization definition, not
+      //        declaration. When it is removed the test needs to be enabled
+      //        in SemaDeclAttr.cpp.
+      WarningsHandler.warnReturnTypestateForUnconsumableType(
+          RTSAttr->getLocation(), ReturnType.getAsString());
+      ExpectedReturnState = CS_None;
+    } else
+      ExpectedReturnState = mapReturnTypestateAttrState(RTSAttr);
+  } else if (isConsumableType(ReturnType))
+    ExpectedReturnState = mapConsumableAttrState(ReturnType);
+  else
+    ExpectedReturnState = CS_None;
+}
+
 bool ConsumedAnalyzer::splitState(const CFGBlock *CurrBlock,
                                   const ConsumedStmtVisitor &Visitor) {
   
-  ConsumedStateMap *FalseStates = new ConsumedStateMap(*CurrStates);
+  OwningPtr<ConsumedStateMap> FalseStates(new ConsumedStateMap(*CurrStates));
   PropagationInfo PInfo;
   
   if (const IfStmt *IfNode =
     dyn_cast_or_null<IfStmt>(CurrBlock->getTerminator().getStmt())) {
     
-    bool HasElse = IfNode->getElse() != NULL;
     const Stmt *Cond = IfNode->getCond();
     
     PInfo = Visitor.getInfo(Cond);
@@ -917,18 +1279,15 @@ bool ConsumedAnalyzer::splitState(const CFGBlock *CurrBlock,
     if (PInfo.isTest()) {
       CurrStates->setSource(Cond);
       FalseStates->setSource(Cond);
-      
       splitVarStateForIf(IfNode, PInfo.getTest(), CurrStates,
-                         HasElse ? FalseStates : NULL);
+                         FalseStates.get());
       
     } else if (PInfo.isBinTest()) {
       CurrStates->setSource(PInfo.testSourceNode());
       FalseStates->setSource(PInfo.testSourceNode());
-      
-      splitVarStateForIfBinOp(PInfo, CurrStates, HasElse ? FalseStates : NULL);
+      splitVarStateForIfBinOp(PInfo, CurrStates, FalseStates.get());
       
     } else {
-      delete FalseStates;
       return false;
     }
     
@@ -940,13 +1299,10 @@ bool ConsumedAnalyzer::splitState(const CFGBlock *CurrBlock,
       if ((BinOp = dyn_cast_or_null<BinaryOperator>(BinOp->getLHS()))) {
         PInfo = Visitor.getInfo(BinOp->getRHS());
         
-        if (!PInfo.isTest()) {
-          delete FalseStates;
+        if (!PInfo.isTest())
           return false;
-        }
         
       } else {
-        delete FalseStates;
         return false;
       }
     }
@@ -972,7 +1328,6 @@ bool ConsumedAnalyzer::splitState(const CFGBlock *CurrBlock,
     }
     
   } else {
-    delete FalseStates;
     return false;
   }
   
@@ -984,9 +1339,7 @@ bool ConsumedAnalyzer::splitState(const CFGBlock *CurrBlock,
     delete CurrStates;
     
   if (*++SI)
-    BlockInfo.addInfo(*SI, FalseStates);
-  else
-    delete FalseStates;
+    BlockInfo.addInfo(*SI, FalseStates.take());
   
   CurrStates = NULL;
   return true;
@@ -994,12 +1347,19 @@ bool ConsumedAnalyzer::splitState(const CFGBlock *CurrBlock,
 
 void ConsumedAnalyzer::run(AnalysisDeclContext &AC) {
   const FunctionDecl *D = dyn_cast_or_null<FunctionDecl>(AC.getDecl());
+  if (!D)
+    return;
   
-  if (!D) return;
-  
-  BlockInfo = ConsumedBlockInfo(AC.getCFG());
-  
+  CFG *CFGraph = AC.getCFG();
+  if (!CFGraph)
+    return;
+
+  determineExpectedReturnState(AC, D);
+
   PostOrderCFGView *SortedGraph = AC.getAnalysis<PostOrderCFGView>();
+  // AC.getCFG()->viewCFG(LangOptions());
+  
+  BlockInfo = ConsumedBlockInfo(CFGraph->getNumBlockIDs(), SortedGraph);
   
   CurrStates = new ConsumedStateMap();
   ConsumedStmtVisitor Visitor(AC, *this, CurrStates);
@@ -1015,7 +1375,6 @@ void ConsumedAnalyzer::run(AnalysisDeclContext &AC) {
        E = SortedGraph->end(); I != E; ++I) {
     
     const CFGBlock *CurrBlock = *I;
-    BlockInfo.markVisited(CurrBlock);
     
     if (CurrStates == NULL)
       CurrStates = BlockInfo.getInfo(CurrBlock);
@@ -1039,8 +1398,37 @@ void ConsumedAnalyzer::run(AnalysisDeclContext &AC) {
       case CFGElement::Statement:
         Visitor.Visit(BI->castAs<CFGStmt>().getStmt());
         break;
-      case CFGElement::AutomaticObjectDtor:
-        CurrStates->remove(BI->castAs<CFGAutomaticObjDtor>().getVarDecl());
+        
+      case CFGElement::TemporaryDtor: {
+        const CFGTemporaryDtor DTor = BI->castAs<CFGTemporaryDtor>();
+        const CXXBindTemporaryExpr *BTE = DTor.getBindTemporaryExpr();
+        PropagationInfo PInfo = Visitor.getInfo(BTE);
+        
+        if (PInfo.isValid())
+          Visitor.checkCallability(PInfo,
+                                   DTor.getDestructorDecl(AC.getASTContext()),
+                                   BTE->getExprLoc());
+        break;
+      }
+      
+      case CFGElement::AutomaticObjectDtor: {
+        const CFGAutomaticObjDtor DTor = BI->castAs<CFGAutomaticObjDtor>();
+        
+        const VarDecl *Var = DTor.getVarDecl();
+        ConsumedState VarState = CurrStates->getState(Var);
+        
+        if (VarState != CS_None) {
+          PropagationInfo PInfo(Var);
+          
+          Visitor.checkCallability(PInfo,
+                                   DTor.getDestructorDecl(AC.getASTContext()),
+                                   getLastStmtLoc(CurrBlock));
+          
+          CurrStates->remove(Var);
+        }
+        break;
+      }
+      
       default:
         break;
       }
@@ -1051,29 +1439,40 @@ void ConsumedAnalyzer::run(AnalysisDeclContext &AC) {
     if (!splitState(CurrBlock, Visitor)) {
       CurrStates->setSource(NULL);
       
-      if (CurrBlock->succ_size() > 1) {
-        CurrStates->makeUnknown();
+      if (CurrBlock->succ_size() > 1 ||
+          (CurrBlock->succ_size() == 1 &&
+           (*CurrBlock->succ_begin())->pred_size() > 1)) {
         
         bool OwnershipTaken = false;
         
         for (CFGBlock::const_succ_iterator SI = CurrBlock->succ_begin(),
              SE = CurrBlock->succ_end(); SI != SE; ++SI) {
           
-          if (*SI) BlockInfo.addInfo(*SI, CurrStates, OwnershipTaken);
+          if (*SI == NULL) continue;
+          
+          if (BlockInfo.isBackEdge(CurrBlock, *SI)) {
+            BlockInfo.borrowInfo(*SI)->intersectAtLoopHead(*SI, CurrBlock,
+                                                           CurrStates,
+                                                           WarningsHandler);
+            
+            if (BlockInfo.allBackEdgesVisited(*SI, CurrBlock))
+              BlockInfo.discardInfo(*SI);
+          } else {
+            BlockInfo.addInfo(*SI, CurrStates, OwnershipTaken);
+          }
         }
         
         if (!OwnershipTaken)
           delete CurrStates;
         
         CurrStates = NULL;
-        
-      } else if (CurrBlock->succ_size() == 1 &&
-                 (*CurrBlock->succ_begin())->pred_size() > 1) {
-        
-        BlockInfo.addInfo(*CurrBlock->succ_begin(), CurrStates);
-        CurrStates = NULL;
       }
     }
+    
+    if (CurrBlock == &AC.getCFG()->getExit() &&
+        D->getCallResultType()->isVoidType())
+      CurrStates->checkParamsForReturnTypestate(D->getLocation(),
+                                                WarningsHandler);
   } // End of block iterator.
   
   // Delete the last existing state map.

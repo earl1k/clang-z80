@@ -486,6 +486,7 @@ void Parser::Initialize() {
 
   Ident_instancetype = 0;
   Ident_final = 0;
+  Ident_sealed = 0;
   Ident_override = 0;
 
   Ident_super = &PP.getIdentifierTable().get("super");
@@ -918,6 +919,26 @@ Parser::ParseDeclarationOrFunctionDefinition(ParsedAttributesWithRange &attrs,
   }
 }
 
+
+static inline bool isFunctionDeclaratorRequiringReturnTypeDeduction(
+    const Declarator &D) {
+  if (!D.isFunctionDeclarator() || !D.getDeclSpec().containsPlaceholderType()) 
+    return false;
+  for (unsigned I = 0, E = D.getNumTypeObjects(); I != E; ++I) {
+    unsigned chunkIndex = E - I - 1;
+    const DeclaratorChunk &DeclType = D.getTypeObject(chunkIndex);
+    if (DeclType.Kind == DeclaratorChunk::Function) {
+      const DeclaratorChunk::FunctionTypeInfo &FTI = DeclType.Fun;
+      if (!FTI.hasTrailingReturnType()) 
+        return true;
+      QualType TrailingRetType = FTI.getTrailingReturnType().get();
+      return TrailingRetType->getCanonicalTypeInternal()
+        ->getContainedAutoType();
+    }
+  } 
+  return false;
+}
+
 /// ParseFunctionDefinition - We parsed and verified that the specified
 /// Declarator is well formed.  If this is a K&R-style function, read the
 /// parameters declaration-list, then start the compound-statement.
@@ -989,9 +1010,10 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
 
   // In delayed template parsing mode, for function template we consume the
   // tokens and store them for late parsing at the end of the translation unit.
-  if (getLangOpts().DelayedTemplateParsing &&
-      Tok.isNot(tok::equal) &&
-      TemplateInfo.Kind == ParsedTemplateInfo::Template) {
+  if (getLangOpts().DelayedTemplateParsing && Tok.isNot(tok::equal) &&
+      TemplateInfo.Kind == ParsedTemplateInfo::Template &&
+      !D.getDeclSpec().isConstexprSpecified() && 
+      !isFunctionDeclaratorRequiringReturnTypeDeduction(D)) {
     MultiTemplateParamsArg TemplateParameterLists(*TemplateInfo.TemplateParams);
     
     ParseScope BodyScope(this, Scope::FnScope|Scope::DeclScope);
@@ -1480,6 +1502,23 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
           && "Cannot be a type or scope token!");
 
   if (Tok.is(tok::kw_typename)) {
+    // MSVC lets you do stuff like:
+    //   typename typedef T_::D D;
+    //
+    // We will consume the typedef token here and put it back after we have
+    // parsed the first identifier, transforming it into something more like:
+    //   typename T_::D typedef D;
+    if (getLangOpts().MicrosoftMode && NextToken().is(tok::kw_typedef)) {
+      Token TypedefToken;
+      PP.Lex(TypedefToken);
+      bool Result = TryAnnotateTypeOrScopeToken(EnteringContext, NeedType);
+      PP.EnterToken(Tok);
+      Tok = TypedefToken;
+      if (!Result)
+        Diag(Tok.getLocation(), diag::warn_expected_qualified_after_typename);
+      return Result;
+    }
+
     // Parse a C++ typename-specifier, e.g., "typename T::type".
     //
     //   typename-specifier:
@@ -1498,7 +1537,7 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
         // Attempt to recover by skipping the invalid 'typename'
         if (Tok.is(tok::annot_decltype) ||
             (!TryAnnotateTypeOrScopeToken(EnteringContext, NeedType) &&
-            Tok.isAnnotation())) {
+             Tok.isAnnotation())) {
           unsigned DiagID = diag::err_expected_qualified_after_typename;
           // MS compatibility: MSVC permits using known types with typename.
           // e.g. "typedef typename T* pointer_type"
@@ -1941,12 +1980,18 @@ bool BalancedDelimiterTracker::diagnoseMissingClose() {
   }
   P.Diag(P.Tok, DID);
   P.Diag(LOpen, diag::note_matching) << LHSName;
-  if (P.SkipUntil(Close, FinalToken, /*StopAtSemi*/ true, /*DontConsume*/ true)
-      && P.Tok.is(Close))
+
+  // If we're not already at some kind of closing bracket, skip to our closing
+  // token.
+  if (P.Tok.isNot(tok::r_paren) && P.Tok.isNot(tok::r_brace) &&
+      P.Tok.isNot(tok::r_square) &&
+      P.SkipUntil(Close, FinalToken, /*StopAtSemi*/true, /*DontConsume*/true) &&
+      P.Tok.is(Close))
     LClose = P.ConsumeAnyToken();
   return true;
 }
 
 void BalancedDelimiterTracker::skipToEnd() {
-  P.SkipUntil(Close, false);
+  P.SkipUntil(Close, false, true);
+  consumeClose();
 }

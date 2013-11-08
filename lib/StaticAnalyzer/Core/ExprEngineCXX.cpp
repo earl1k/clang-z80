@@ -91,6 +91,12 @@ void ExprEngine::performTrivialCopy(NodeBuilder &Bldr, ExplodedNode *Pred,
 /// If the type is not an array type at all, the original value is returned.
 static SVal makeZeroElementRegion(ProgramStateRef State, SVal LValue,
                                   QualType &Ty) {
+  // FIXME: This check is just a temporary workaround, because
+  // ProcessTemporaryDtor sends us NULL regions. It will not be necessary once
+  // we can properly process temporary destructors.
+  if (!LValue.getAsRegion())
+    return LValue;
+
   SValBuilder &SVB = State->getStateManager().getSValBuilder();
   ASTContext &Ctx = SVB.getContext();
 
@@ -290,7 +296,9 @@ void ExprEngine::VisitCXXDestructor(QualType ObjectType,
   // FIXME: We need to run the same destructor on every element of the array.
   // This workaround will just run the first destructor (which will still
   // invalidate the entire array).
-  SVal DestVal = loc::MemRegionVal(Dest);
+  SVal DestVal = UnknownVal();
+  if (Dest)
+    DestVal = loc::MemRegionVal(Dest);
   DestVal = makeZeroElementRegion(State, DestVal, ObjectType);
   Dest = DestVal.getAsRegion();
 

@@ -13,6 +13,7 @@
 
 #include "clang/Sema/DeclSpec.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/TypeLoc.h"
@@ -323,6 +324,13 @@ bool Declarator::isDeclarationOfFunction() const {
   }
 
   llvm_unreachable("Invalid TypeSpecType!");
+}
+
+bool Declarator::isStaticMember() {
+  assert(getContext() == MemberContext);
+  return getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_static ||
+         CXXMethodDecl::isStaticOverloadedOperator(
+             getName().OperatorFunctionId.Operator);
 }
 
 /// getParsedSpecifiers - Return a bitmask of which flavors of specifiers this
@@ -1110,6 +1118,7 @@ bool VirtSpecifiers::SetSpecifier(Specifier VS, SourceLocation Loc,
   switch (VS) {
   default: llvm_unreachable("Unknown specifier!");
   case VS_Override: VS_overrideLoc = Loc; break;
+  case VS_Sealed:
   case VS_Final:    VS_finalLoc = Loc; break;
   }
 
@@ -1121,5 +1130,6 @@ const char *VirtSpecifiers::getSpecifierName(Specifier VS) {
   default: llvm_unreachable("Unknown specifier");
   case VS_Override: return "override";
   case VS_Final: return "final";
+  case VS_Sealed: return "sealed";
   }
 }

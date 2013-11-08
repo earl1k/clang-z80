@@ -738,9 +738,9 @@ bool Type::isSignedIntegerOrEnumerationType() const {
 
 bool Type::hasSignedIntegerRepresentation() const {
   if (const VectorType *VT = dyn_cast<VectorType>(CanonicalType))
-    return VT->getElementType()->isSignedIntegerType();
+    return VT->getElementType()->isSignedIntegerOrEnumerationType();
   else
-    return isSignedIntegerType();
+    return isSignedIntegerOrEnumerationType();
 }
 
 /// isUnsignedIntegerType - Return true if this is an integer type that is
@@ -778,9 +778,9 @@ bool Type::isUnsignedIntegerOrEnumerationType() const {
 
 bool Type::hasUnsignedIntegerRepresentation() const {
   if (const VectorType *VT = dyn_cast<VectorType>(CanonicalType))
-    return VT->getElementType()->isUnsignedIntegerType();
+    return VT->getElementType()->isUnsignedIntegerOrEnumerationType();
   else
-    return isUnsignedIntegerType();
+    return isUnsignedIntegerOrEnumerationType();
 }
 
 bool Type::isFloatingType() const {
@@ -1097,13 +1097,16 @@ bool QualType::isTriviallyCopyableType(ASTContext &Context) const {
     }        
   }
 
-  // C++0x [basic.types]p9
+  // C++11 [basic.types]p9
   //   Scalar types, trivially copyable class types, arrays of such types, and
-  //   cv-qualified versions of these types are collectively called trivial
-  //   types.
+  //   non-volatile const-qualified versions of these types are collectively
+  //   called trivially copyable types.
 
   QualType CanonicalType = getCanonicalType();
   if (CanonicalType->isDependentType())
+    return false;
+
+  if (CanonicalType.isVolatileQualified())
     return false;
 
   // Return false for incomplete types after skipping any incomplete array types

@@ -46,10 +46,12 @@ struct AvailabilityChange {
 };
 
 /// \brief Wraps an identifier and optional source location for the identifier.
-/// It is expected that these will be created from the ASTContext memory pool.
 struct IdentifierLoc {
   SourceLocation Loc;
   IdentifierInfo *Ident;
+
+  static IdentifierLoc *create(ASTContext &Ctx, SourceLocation Loc,
+                               IdentifierInfo *Ident);
 };
 
 /// \brief A union of the various pointer types that can be passed to an
@@ -448,7 +450,7 @@ public:
   }
 
   const ParsedType &getTypeArg() const {
-    assert(getKind() == AT_VecTypeHint && "Not a type attribute");
+    assert(HasParsedType && "Not a type attribute");
     return getTypeBuffer();
   }
 
@@ -461,6 +463,10 @@ public:
   /// defined in Attr.td. This index is used by an attribute
   /// to pretty print itself.
   unsigned getAttributeSpellingListIndex() const;
+
+  bool hasCustomParsing() const;
+  unsigned getMinArgs() const;
+  unsigned getMaxArgs() const;
 };
 
 /// A factory, from which one makes pools, from which one creates

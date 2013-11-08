@@ -21,7 +21,9 @@
 #include "clang/Driver/SanitizerArgs.h"
 #include "clang/Driver/ToolChain.h"
 #include "clang/Driver/Util.h"
+#include "clang/Sema/SemaDiagnostic.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Option/Arg.h"
@@ -31,6 +33,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/Host.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/raw_ostream.h"
@@ -459,13 +462,14 @@ static const char *getLLVMArchSuffixForARM(StringRef CPU) {
     .Cases("arm1176jzf-s",  "mpcorenovfp",  "mpcore", "v6")
     .Cases("arm1156t2-s",  "arm1156t2f-s", "v6t2")
     .Cases("cortex-a5", "cortex-a7", "cortex-a8", "v7")
-    .Cases("cortex-a9", "cortex-a15", "v7")
-    .Case("cortex-r5", "v7r")
+    .Cases("cortex-a9", "cortex-a12", "cortex-a15", "v7")
+    .Cases("cortex-r4", "cortex-r5", "v7r")
     .Case("cortex-m0", "v6m")
     .Case("cortex-m3", "v7m")
     .Case("cortex-m4", "v7em")
     .Case("cortex-a9-mp", "v7f")
     .Case("swift", "v7s")
+    .Cases("cortex-a53", "cortex-a57", "v8")
     .Default("");
 }
 
@@ -536,6 +540,26 @@ static std::string getARMTargetCPU(const ArgList &Args,
     .Default("arm7tdmi");
 }
 
+/// getAArch64TargetCPU - Get the (LLVM) name of the AArch64 cpu we are targeting.
+//
+// FIXME: tblgen this.
+static std::string getAArch64TargetCPU(const ArgList &Args,
+                                       const llvm::Triple &Triple) {
+  // FIXME: Warn on inconsistent use of -mcpu and -march.
+
+  // If we have -mcpu=, use that.
+  if (Arg *A = Args.getLastArg(options::OPT_mcpu_EQ)) {
+    StringRef MCPU = A->getValue();
+    // Handle -mcpu=native.
+    if (MCPU == "native")
+      return llvm::sys::getHostCPUName();
+    else
+      return MCPU;
+  }
+
+  return "generic";
+}
+
 // FIXME: Move to target hook.
 static bool isSignedCharDefault(const llvm::Triple &Triple) {
   switch (Triple.getArch()) {
@@ -571,8 +595,57 @@ static bool isNoCommonDefault(const llvm::Triple &Triple) {
 //
 // FIXME: Centralize feature selection, defaulting shouldn't be also in the
 // frontend target.
-static void getFPUFeatures(const Driver &D, const Arg *A, const ArgList &Args,
-                           std::vector<const char *> &Features) {
+static void getAArch64FPUFeatures(const Driver &D, const Arg *A,
+                                  const ArgList &Args,
+                                  std::vector<const char *> &Features) {
+  StringRef FPU = A->getValue();
+  if (FPU == "fp-armv8") {
+    Features.push_back("+fp-armv8");
+  } else if (FPU == "neon-fp-armv8") {
+    Features.push_back("+fp-armv8");
+    Features.push_back("+neon");
+  } else if (FPU == "crypto-neon-fp-armv8") {
+    Features.push_back("+fp-armv8");
+    Features.push_back("+neon");
+    Features.push_back("+crypto");
+  } else if (FPU == "neon") {
+    Features.push_back("+neon");
+  } else if (FPU == "none") {
+    Features.push_back("-fp-armv8");
+    Features.push_back("-crypto");
+    Features.push_back("-neon");
+  } else
+    D.Diag(diag::err_drv_clang_unsupported) << A->getAsString(Args);
+}
+
+// Handle -mhwdiv=.
+static void getARMHWDivFeatures(const Driver &D, const Arg *A,
+                              const ArgList &Args,
+                              std::vector<const char *> &Features) {
+  StringRef HWDiv = A->getValue();
+  if (HWDiv == "arm") {
+    Features.push_back("+hwdiv-arm");
+    Features.push_back("-hwdiv");
+  } else if (HWDiv == "thumb") {
+    Features.push_back("-hwdiv-arm");
+    Features.push_back("+hwdiv");
+  } else if (HWDiv == "arm,thumb" || HWDiv == "thumb,arm") {
+    Features.push_back("+hwdiv-arm");
+    Features.push_back("+hwdiv");
+  } else if (HWDiv == "none") {
+    Features.push_back("-hwdiv-arm");
+    Features.push_back("-hwdiv");
+  } else
+    D.Diag(diag::err_drv_clang_unsupported) << A->getAsString(Args);
+}
+ 
+// Handle -mfpu=.
+//
+// FIXME: Centralize feature selection, defaulting shouldn't be also in the
+// frontend target.
+static void getARMFPUFeatures(const Driver &D, const Arg *A,
+                              const ArgList &Args,
+                              std::vector<const char *> &Features) {
   StringRef FPU = A->getValue();
 
   // Set the target features based on the FPU.
@@ -592,12 +665,26 @@ static void getFPUFeatures(const Driver &D, const Arg *A, const ArgList &Args,
     Features.push_back("+vfp3");
     Features.push_back("-neon");
   } else if (FPU == "fp-armv8") {
-    Features.push_back("+v8fp");
+    Features.push_back("+fp-armv8");
+    Features.push_back("-neon");
+    Features.push_back("-crypto");
   } else if (FPU == "neon-fp-armv8") {
-    Features.push_back("+v8fp");
+    Features.push_back("+fp-armv8");
     Features.push_back("+neon");
+    Features.push_back("-crypto");
+  } else if (FPU == "crypto-neon-fp-armv8") {
+    Features.push_back("+fp-armv8");
+    Features.push_back("+neon");
+    Features.push_back("+crypto");
   } else if (FPU == "neon") {
     Features.push_back("+neon");
+  } else if (FPU == "none") {
+    Features.push_back("-vfp2");
+    Features.push_back("-vfp3");
+    Features.push_back("-vfp4");
+    Features.push_back("-fp-armv8");
+    Features.push_back("-crypto");
+    Features.push_back("-neon");
   } else
     D.Diag(diag::err_drv_clang_unsupported) << A->getAsString(Args);
 }
@@ -699,12 +786,23 @@ static void getARMTargetFeatures(const Driver &D, const llvm::Triple &Triple,
 
   // Honor -mfpu=.
   if (const Arg *A = Args.getLastArg(options::OPT_mfpu_EQ))
-    getFPUFeatures(D, A, Args, Features);
+    getARMFPUFeatures(D, A, Args, Features);
+  if (const Arg *A = Args.getLastArg(options::OPT_mhwdiv_EQ))
+    getARMHWDivFeatures(D, A, Args, Features);
 
   // Setting -msoft-float effectively disables NEON because of the GCC
   // implementation, although the same isn't true of VFP or VFP3.
   if (FloatABI == "soft")
     Features.push_back("-neon");
+
+  // En/disable crc
+  if (Arg *A = Args.getLastArg(options::OPT_mcrc,
+                               options::OPT_mnocrc)) {
+    if (A->getOption().matches(options::OPT_mcrc))
+      Features.push_back("+crc");
+    else
+      Features.push_back("-crc");
+  }
 }
 
 void Clang::AddARMTargetArgs(const ArgList &Args,
@@ -725,7 +823,8 @@ void Clang::AddARMTargetArgs(const ArgList &Args,
   } else if (Triple.isOSDarwin()) {
     // The backend is hardwired to assume AAPCS for M-class processors, ensure
     // the frontend matches that.
-    if (StringRef(CPUName).startswith("cortex-m")) {
+    if (Triple.getEnvironment() == llvm::Triple::EABI ||
+        StringRef(CPUName).startswith("cortex-m")) {
       ABIName = "aapcs";
     } else {
       ABIName = "apcs-gnu";
@@ -770,7 +869,7 @@ void Clang::AddARMTargetArgs(const ArgList &Args,
 
   // Kernel code has more strict alignment requirements.
   if (KernelOrKext) {
-    if (Triple.getOS() != llvm::Triple::IOS || Triple.isOSVersionLT(6)) {
+    if (!Triple.isiOS() || Triple.isOSVersionLT(6)) {
       CmdArgs.push_back("-backend-option");
       CmdArgs.push_back("-arm-long-calls");
     }
@@ -805,20 +904,6 @@ void Clang::AddARMTargetArgs(const ArgList &Args,
     }
 }
 
-// Translate MIPS CPU name alias option to CPU name.
-static StringRef getMipsCPUFromAlias(const Arg &A) {
-  if (A.getOption().matches(options::OPT_mips32))
-    return "mips32";
-  if (A.getOption().matches(options::OPT_mips32r2))
-    return "mips32r2";
-  if (A.getOption().matches(options::OPT_mips64))
-    return "mips64";
-  if (A.getOption().matches(options::OPT_mips64r2))
-    return "mips64r2";
-  llvm_unreachable("Unexpected option");
-  return "";
-}
-
 // Get CPU and ABI names. They are not independent
 // so we have to calculate them together.
 static void getMipsCPUAndABI(const ArgList &Args,
@@ -829,13 +914,8 @@ static void getMipsCPUAndABI(const ArgList &Args,
   const char *DefMips64CPU = "mips64";
 
   if (Arg *A = Args.getLastArg(options::OPT_march_EQ,
-                               options::OPT_mcpu_EQ,
-                               options::OPT_mips_CPUs_Group)) {
-    if (A->getOption().matches(options::OPT_mips_CPUs_Group))
-      CPUName = getMipsCPUFromAlias(*A);
-    else
-      CPUName = A->getValue();
-  }
+                               options::OPT_mcpu_EQ))
+    CPUName = A->getValue();
 
   if (Arg *A = Args.getLastArg(options::OPT_mabi_EQ)) {
     ABIName = A->getValue();
@@ -943,6 +1023,11 @@ static void getMIPSTargetFeatures(const Driver &D, const ArgList &Args,
     Features.push_back("+soft-float");
   }
 
+  if (Arg *A = Args.getLastArg(options::OPT_mnan_EQ)) {
+    if (StringRef(A->getValue()) == "2008")
+      Features.push_back("+nan2008");
+  }
+
   AddTargetFeature(Args, Features, options::OPT_msingle_float,
                    options::OPT_mdouble_float, "single-float");
   AddTargetFeature(Args, Features, options::OPT_mips16, options::OPT_mno_mips16,
@@ -955,6 +1040,8 @@ static void getMIPSTargetFeatures(const Driver &D, const ArgList &Args,
                    "dspr2");
   AddTargetFeature(Args, Features, options::OPT_mmsa, options::OPT_mno_msa,
                    "msa");
+  AddTargetFeature(Args, Features, options::OPT_mfp64, options::OPT_mfp32,
+                   "fp64");
 }
 
 void Clang::AddMIPSTargetArgs(const ArgList &Args,
@@ -1085,30 +1172,39 @@ static std::string getPPCTargetCPU(const ArgList &Args) {
 
 static void getPPCTargetFeatures(const ArgList &Args,
                                  std::vector<const char *> &Features) {
-  // Allow override of the Altivec feature.
+  for (arg_iterator it = Args.filtered_begin(options::OPT_m_ppc_Features_Group),
+                    ie = Args.filtered_end();
+       it != ie; ++it) {
+    StringRef Name = (*it)->getOption().getName();
+    (*it)->claim();
+
+    // Skip over "-m".
+    assert(Name.startswith("m") && "Invalid feature name.");
+    Name = Name.substr(1);
+
+    bool IsNegative = Name.startswith("no-");
+    if (IsNegative)
+      Name = Name.substr(3);
+
+    // Note that gcc calls this mfcrf and LLVM calls this mfocrf so we
+    // pass the correct option to the backend while calling the frontend
+    // option the same.
+    // TODO: Change the LLVM backend option maybe?
+    if (Name == "mfcrf")
+      Name = "mfocrf";
+
+    Features.push_back(Args.MakeArgString((IsNegative ? "-" : "+") + Name));
+  }
+
+  // Altivec is a bit weird, allow overriding of the Altivec feature here.
   AddTargetFeature(Args, Features, options::OPT_faltivec,
                    options::OPT_fno_altivec, "altivec");
-
-  AddTargetFeature(Args, Features, options::OPT_mfprnd, options::OPT_mno_fprnd,
-                   "fprnd");
-
-  // Note that gcc calls this mfcrf and LLVM calls this mfocrf.
-  AddTargetFeature(Args, Features, options::OPT_mmfcrf, options::OPT_mno_mfcrf,
-                   "mfocrf");
-
-  AddTargetFeature(Args, Features, options::OPT_mpopcntd,
-                   options::OPT_mno_popcntd, "popcntd");
-
-  // It is really only possible to turn qpx off because turning qpx on is tied
-  // to using the a2q CPU.
-  if (Args.hasFlag(options::OPT_mno_qpx, options::OPT_mqpx, false))
-    Features.push_back("-qpx");
 }
 
 /// Get the (LLVM) name of the R600 gpu we are targeting.
 static std::string getR600TargetGPU(const ArgList &Args) {
   if (Arg *A = Args.getLastArg(options::OPT_mcpu_EQ)) {
-    std::string GPUName = A->getValue();
+    const char *GPUName = A->getValue();
     return llvm::StringSwitch<const char *>(GPUName)
       .Cases("rv630", "rv635", "r600")
       .Cases("rv610", "rv620", "rs780", "rs880")
@@ -1117,7 +1213,7 @@ static std::string getR600TargetGPU(const ArgList &Args) {
       .Cases("sumo", "sumo2", "sumo")
       .Case("hemlock", "cypress")
       .Case("aruba", "cayman")
-      .Default(GPUName.c_str());
+      .Default(GPUName);
   }
   return "";
 }
@@ -1200,33 +1296,37 @@ static const char *getX86TargetCPU(const ArgList &Args,
   if (Triple.isOSDarwin())
     return Is64Bit ? "core2" : "yonah";
 
-  // Everything else goes to x86-64 in 64-bit mode.
-  if (Is64Bit)
-    return "x86-64";
-
-  if (Triple.getOSName().startswith("haiku"))
-    return "i586";
-  if (Triple.getOSName().startswith("openbsd"))
-    return "i486";
-  if (Triple.getOSName().startswith("bitrig"))
-    return "i686";
-  if (Triple.getOSName().startswith("freebsd"))
-    return "i486";
-  if (Triple.getOSName().startswith("netbsd"))
-    return "i486";
   // All x86 devices running Android have core2 as their common
   // denominator. This makes a better choice than pentium4.
   if (Triple.getEnvironment() == llvm::Triple::Android)
     return "core2";
 
-  // Fallback to p4.
-  return "pentium4";
+  // Everything else goes to x86-64 in 64-bit mode.
+  if (Is64Bit)
+    return "x86-64";
+
+  switch (Triple.getOS()) {
+  case llvm::Triple::FreeBSD:
+  case llvm::Triple::NetBSD:
+  case llvm::Triple::OpenBSD:
+    return "i486";
+  case llvm::Triple::Haiku:
+    return "i586";
+  case llvm::Triple::Bitrig:
+    return "i686";
+  default:
+    // Fallback to p4.
+    return "pentium4";
+  }
 }
 
 static std::string getCPUName(const ArgList &Args, const llvm::Triple &T) {
   switch(T.getArch()) {
   default:
     return "";
+
+  case llvm::Triple::aarch64:
+    return getAArch64TargetCPU(Args, T);
 
   case llvm::Triple::arm:
   case llvm::Triple::thumb:
@@ -1374,7 +1474,7 @@ static void getAArch64TargetFeatures(const Driver &D, const ArgList &Args,
                                      std::vector<const char *> &Features) {
   // Honor -mfpu=.
   if (const Arg *A = Args.getLastArg(options::OPT_mfpu_EQ))
-    getFPUFeatures(D, A, Args, Features);
+    getAArch64FPUFeatures(D, A, Args, Features);
 }
 
 static void getTargetFeatures(const Driver &D, const llvm::Triple &Triple,
@@ -1681,6 +1781,7 @@ static void addSanitizerRTLinkFlagsLinux(
   CmdArgs.push_back("-lpthread");
   CmdArgs.push_back("-lrt");
   CmdArgs.push_back("-ldl");
+  CmdArgs.push_back("-lm");
 
   // If possible, use a dynamic symbols file to export the symbols from the
   // runtime library. If we can't do so, use -export-dynamic instead to export
@@ -1698,7 +1799,7 @@ static void addSanitizerRTLinkFlagsLinux(
 /// This needs to be called before we add the C run-time (malloc, etc).
 static void addAsanRTLinux(const ToolChain &TC, const ArgList &Args,
                            ArgStringList &CmdArgs) {
-  if(TC.getTriple().getEnvironment() == llvm::Triple::Android) {
+  if (TC.getTriple().getEnvironment() == llvm::Triple::Android) {
     SmallString<128> LibAsan(TC.getDriver().ResourceDir);
     llvm::sys::path::append(LibAsan, "lib", "linux",
         (Twine("libclang_rt.asan-") +
@@ -1758,26 +1859,36 @@ static void addDfsanRTLinux(const ToolChain &TC, const ArgList &Args,
     addSanitizerRTLinkFlagsLinux(TC, Args, CmdArgs, "dfsan", true);
 }
 
+static bool shouldUseFramePointerForTarget(const ArgList &Args,
+                                           const llvm::Triple &Triple) {
+  switch (Triple.getArch()) {
+  // Don't use a frame pointer on linux if optimizing for certain targets.
+  case llvm::Triple::mips64:
+  case llvm::Triple::mips64el:
+  case llvm::Triple::mips:
+  case llvm::Triple::mipsel:
+  case llvm::Triple::systemz:
+  case llvm::Triple::x86:
+  case llvm::Triple::x86_64:
+    if (Triple.isOSLinux())
+      if (Arg *A = Args.getLastArg(options::OPT_O_Group))
+        if (!A->getOption().matches(options::OPT_O0))
+          return false;
+    return true;
+  case llvm::Triple::xcore:
+    return false;
+  default:
+    return true;
+  }
+}
+
 static bool shouldUseFramePointer(const ArgList &Args,
                                   const llvm::Triple &Triple) {
   if (Arg *A = Args.getLastArg(options::OPT_fno_omit_frame_pointer,
                                options::OPT_fomit_frame_pointer))
     return A->getOption().matches(options::OPT_fno_omit_frame_pointer);
 
-  // Don't use a frame pointer on linux x86, x86_64 and z if optimizing.
-  if ((Triple.getArch() == llvm::Triple::x86_64 ||
-       Triple.getArch() == llvm::Triple::x86 ||
-       Triple.getArch() == llvm::Triple::systemz) &&
-      Triple.getOS() == llvm::Triple::Linux) {
-    if (Arg *A = Args.getLastArg(options::OPT_O_Group))
-      if (!A->getOption().matches(options::OPT_O0))
-        return false;
-  }
-
-  if (Triple.getArch() == llvm::Triple::xcore)
-    return false;
-
-  return true;
+  return shouldUseFramePointerForTarget(Args, Triple);
 }
 
 static bool shouldUseLeafFramePointer(const ArgList &Args,
@@ -1786,20 +1897,7 @@ static bool shouldUseLeafFramePointer(const ArgList &Args,
                                options::OPT_momit_leaf_frame_pointer))
     return A->getOption().matches(options::OPT_mno_omit_leaf_frame_pointer);
 
-  // Don't use a leaf frame pointer on linux x86, x86_64 and z if optimizing.
-  if ((Triple.getArch() == llvm::Triple::x86_64 ||
-       Triple.getArch() == llvm::Triple::x86 ||
-       Triple.getArch() == llvm::Triple::systemz) &&
-      Triple.getOS() == llvm::Triple::Linux) {
-    if (Arg *A = Args.getLastArg(options::OPT_O_Group))
-      if (!A->getOption().matches(options::OPT_O0))
-        return false;
-  }
-
-  if (Triple.getArch() == llvm::Triple::xcore)
-    return false;
-
-  return true;
+  return shouldUseFramePointerForTarget(Args, Triple);
 }
 
 /// Add a CC1 option to specify the debug compilation directory.
@@ -2080,7 +2178,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     }
   }
 
-  // Inroduce a Darwin-specific hack. If the default is PIC but the flags
+  // Introduce a Darwin-specific hack. If the default is PIC but the flags
   // specified while enabling PIC enabled level 1 PIC, just force it back to
   // level 2 PIC instead. This matches the behavior of Darwin GCC (based on my
   // informal testing).
@@ -2091,8 +2189,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   // PIC or PIE options above, if these show up, PIC is disabled.
   llvm::Triple Triple(TripleStr);
   if (KernelOrKext &&
-      (Triple.getOS() != llvm::Triple::IOS ||
-       Triple.isOSVersionLT(6)))
+      (!Triple.isiOS() || Triple.isOSVersionLT(6)))
     PIC = PIE = false;
   if (Args.hasArg(options::OPT_static))
     PIC = PIE = false;
@@ -2174,8 +2271,9 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
                     options::OPT_fno_strict_aliasing,
                     getToolChain().IsStrictAliasingDefault()))
     CmdArgs.push_back("-relaxed-aliasing");
-  if (Args.hasArg(options::OPT_fstruct_path_tbaa))
-    CmdArgs.push_back("-struct-path-tbaa");
+  if (!Args.hasFlag(options::OPT_fstruct_path_tbaa,
+                    options::OPT_fno_struct_path_tbaa))
+    CmdArgs.push_back("-no-struct-path-tbaa");
   if (Args.hasFlag(options::OPT_fstrict_enums, options::OPT_fno_strict_enums,
                    false))
     CmdArgs.push_back("-fstrict-enums");
@@ -2499,16 +2597,22 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   if (Args.hasArg(options::OPT_gcolumn_info))
     CmdArgs.push_back("-dwarf-column-info");
 
+  // FIXME: Move backend command line options to the module.
   // -gsplit-dwarf should turn on -g and enable the backend dwarf
   // splitting and extraction.
   // FIXME: Currently only works on Linux.
-  if (getToolChain().getTriple().getOS() == llvm::Triple::Linux &&
+  if (getToolChain().getTriple().isOSLinux() &&
       Args.hasArg(options::OPT_gsplit_dwarf)) {
     CmdArgs.push_back("-g");
     CmdArgs.push_back("-backend-option");
     CmdArgs.push_back("-split-dwarf=Enable");
   }
 
+  // -ggnu-pubnames turns on gnu style pubnames in the backend.
+  if (Args.hasArg(options::OPT_ggnu_pubnames)) {
+    CmdArgs.push_back("-backend-option");
+    CmdArgs.push_back("-generate-gnu-dwarf-pub-sections");
+  }
 
   Args.AddAllArgs(CmdArgs, options::OPT_fdebug_types_section);
 
@@ -2558,7 +2662,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   Args.AddLastArg(CmdArgs, options::OPT_working_directory);
 
   bool ARCMTEnabled = false;
-  if (!Args.hasArg(options::OPT_fno_objc_arc)) {
+  if (!Args.hasArg(options::OPT_fno_objc_arc, options::OPT_fobjc_arc)) {
     if (const Arg *A = Args.getLastArg(options::OPT_ccc_arcmt_check,
                                        options::OPT_ccc_arcmt_modify,
                                        options::OPT_ccc_arcmt_migrate)) {
@@ -2677,13 +2781,20 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     Args.AddLastArg(CmdArgs, options::OPT_trigraphs);
   }
 
-  // Map the bizarre '-Wwrite-strings' flag to a more sensible
-  // '-fconst-strings'; this better indicates its actual behavior.
-  if (Args.hasFlag(options::OPT_Wwrite_strings, options::OPT_Wno_write_strings,
-                   false)) {
-    // For perfect compatibility with GCC, we do this even in the presence of
-    // '-w'. This flag names something other than a warning for GCC.
-    CmdArgs.push_back("-fconst-strings");
+  // GCC's behavior for -Wwrite-strings is a bit strange:
+  //  * In C, this "warning flag" changes the types of string literals from
+  //    'char[N]' to 'const char[N]', and thus triggers an unrelated warning
+  //    for the discarded qualifier.
+  //  * In C++, this is just a normal warning flag.
+  //
+  // Implementing this warning correctly in C is hard, so we follow GCC's
+  // behavior for now. FIXME: Directly diagnose uses of a string literal as
+  // a non-const char* in C, rather than using this crude hack.
+  if (!types::isCXX(InputType)) {
+    DiagnosticsEngine::Level DiagLevel = D.getDiags().getDiagnosticLevel(
+        diag::warn_deprecated_string_literal_conversion_c, SourceLocation());
+    if (DiagLevel > DiagnosticsEngine::Ignored)
+      CmdArgs.push_back("-fconst-strings");
   }
 
   // GCC provides a macro definition '__DEPRECATED' when -Wdeprecated is active
@@ -2718,6 +2829,11 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   if (Arg *A = Args.getLastArg(options::OPT_ftemplate_depth_,
                                options::OPT_ftemplate_depth_EQ)) {
     CmdArgs.push_back("-ftemplate-depth");
+    CmdArgs.push_back(A->getValue());
+  }
+
+  if (Arg *A = Args.getLastArg(options::OPT_foperator_arrow_depth_EQ)) {
+    CmdArgs.push_back("-foperator-arrow-depth");
     CmdArgs.push_back(A->getValue());
   }
 
@@ -2828,8 +2944,8 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   Args.AddLastArg(CmdArgs, options::OPT_fdiagnostics_show_template_tree);
   Args.AddLastArg(CmdArgs, options::OPT_fno_elide_type);
 
-  const SanitizerArgs &Sanitize = D.getOrParseSanitizerArgs(Args);
-  Sanitize.addArgs(getToolChain(), Args, CmdArgs);
+  const SanitizerArgs &Sanitize = getToolChain().getSanitizerArgs();
+  Sanitize.addArgs(Args, CmdArgs);
 
   if (!Args.hasFlag(options::OPT_fsanitize_recover,
                     options::OPT_fno_sanitize_recover,
@@ -3008,6 +3124,28 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back("-fmodule-maps");
   }
 
+  // -fmodules-decluse checks that modules used are declared so (off by
+  // default).
+  if (Args.hasFlag(options::OPT_fmodules_decluse,
+                   options::OPT_fno_modules_decluse,
+                   false)) {
+    CmdArgs.push_back("-fmodules-decluse");
+  }
+
+  // -fmodule-name specifies the module that is currently being built (or
+  // used for header checking by -fmodule-maps).
+  if (Arg *A = Args.getLastArg(options::OPT_fmodule_name)) {
+    A->claim();
+    A->render(Args, CmdArgs);
+  }
+
+  // -fmodule-map-file can be used to specify a file containing module
+  // definitions.
+  if (Arg *A = Args.getLastArg(options::OPT_fmodule_map_file)) {
+    A->claim();
+    A->render(Args, CmdArgs);
+  }
+
   // If a module path was provided, pass it along. Otherwise, use a temporary
   // directory.
   if (Arg *A = Args.getLastArg(options::OPT_fmodules_cache_path)) {
@@ -3078,11 +3216,11 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back("-fno-threadsafe-statics");
 
   // -fuse-cxa-atexit is default.
-  if (!Args.hasFlag(options::OPT_fuse_cxa_atexit,
-                    options::OPT_fno_use_cxa_atexit,
-                   getToolChain().getTriple().getOS() != llvm::Triple::Cygwin &&
-                  getToolChain().getTriple().getOS() != llvm::Triple::MinGW32 &&
-              getToolChain().getArch() != llvm::Triple::hexagon) ||
+  if (!Args.hasFlag(
+           options::OPT_fuse_cxa_atexit, options::OPT_fno_use_cxa_atexit,
+           getToolChain().getTriple().getOS() != llvm::Triple::Cygwin &&
+               getToolChain().getTriple().getOS() != llvm::Triple::MinGW32 &&
+               getToolChain().getArch() != llvm::Triple::hexagon) ||
       KernelOrKext)
     CmdArgs.push_back("-fno-use-cxa-atexit");
 
@@ -3100,13 +3238,13 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
                                  true))))
     CmdArgs.push_back("-fms-compatibility");
 
-  // -fmsc-version=1300 is default.
+  // -fmsc-version=1700 is default.
   if (Args.hasFlag(options::OPT_fms_extensions, options::OPT_fno_ms_extensions,
                    getToolChain().getTriple().getOS() == llvm::Triple::Win32) ||
       Args.hasArg(options::OPT_fmsc_version)) {
     StringRef msc_ver = Args.getLastArgValue(options::OPT_fmsc_version);
     if (msc_ver.empty())
-      CmdArgs.push_back("-fmsc-version=1300");
+      CmdArgs.push_back("-fmsc-version=1700");
     else
       CmdArgs.push_back(Args.MakeArgString("-fmsc-version=" + msc_ver));
   }
@@ -3144,8 +3282,9 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   ObjCRuntime objcRuntime = AddObjCRuntimeArgs(Args, CmdArgs, rewriteKind);
 
   // -fobjc-dispatch-method is only relevant with the nonfragile-abi, and
-  // legacy is the default.
-  if (objcRuntime.isNonFragile()) {
+  // legacy is the default. Next runtime is always legacy dispatch and
+  // -fno-objc-legacy-dispatch gets ignored silently.
+  if (objcRuntime.isNonFragile() && !objcRuntime.isNeXTFamily()) {
     if (!Args.hasFlag(options::OPT_fobjc_legacy_dispatch,
                       options::OPT_fno_objc_legacy_dispatch,
                       objcRuntime.isLegacyDispatchDefaultForArch(
@@ -3155,12 +3294,6 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
       else
         CmdArgs.push_back("-fobjc-dispatch-method=non-legacy");
     }
-  }
-
-  // -fobjc-default-synthesize-properties=1 is default. This only has an effect
-  // if the nonfragile objc abi is used.
-  if (getToolChain().IsObjCDefaultSynthPropertiesDefault()) {
-    CmdArgs.push_back("-fobjc-default-synthesize-properties");
   }
 
   // -fencode-extended-block-signature=1 is default.
@@ -3359,6 +3492,9 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
       (ShowColors == Colors_Auto && llvm::sys::Process::StandardErrHasColors()))
     CmdArgs.push_back("-fcolor-diagnostics");
 
+  if (Args.hasArg(options::OPT_fansi_escape_codes))
+    CmdArgs.push_back("-fansi-escape-codes");
+
   if (!Args.hasFlag(options::OPT_fshow_source_location,
                     options::OPT_fno_show_source_location))
     CmdArgs.push_back("-fno-show-source-location");
@@ -3533,7 +3669,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   // Add the split debug info name to the command lines here so we
   // can propagate it to the backend.
   bool SplitDwarf = Args.hasArg(options::OPT_gsplit_dwarf) &&
-    (getToolChain().getTriple().getOS() == llvm::Triple::Linux) &&
+    getToolChain().getTriple().isOSLinux() &&
     (isa<AssembleJobAction>(JA) || isa<CompileJobAction>(JA));
   const char *SplitDwarfOut;
   if (SplitDwarf) {
@@ -3543,7 +3679,15 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   }
 
   // Finally add the compile command to the compilation.
-  C.addCommand(new Command(JA, *this, Exec, CmdArgs));
+  if (Args.hasArg(options::OPT__SLASH_fallback)) {
+    tools::visualstudio::Compile CL(getToolChain());
+    Command *CLCommand = CL.GetCommand(C, JA, Output, Inputs, Args,
+                                       LinkingOutput);
+    C.addCommand(new FallbackCommand(JA, *this, Exec, CmdArgs, CLCommand));
+  } else {
+    C.addCommand(new Command(JA, *this, Exec, CmdArgs));
+  }
+
 
   // Handle the debug info splitting at object creation time if we're
   // creating an object.
@@ -3568,11 +3712,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   Args.ClaimAllArgs(options::OPT_clang_ignored_f_Group);
   Args.ClaimAllArgs(options::OPT_clang_ignored_m_Group);
 
-  // Claim ignored clang-cl options.
-  Args.ClaimAllArgs(options::OPT_cl_ignored_Group);
-
-  // Disable warnings for clang -E -use-gold-plugin -emit-llvm foo.c
-  Args.ClaimAllArgs(options::OPT_use_gold_plugin);
+  // Disable warnings for clang -E -emit-llvm foo.c
   Args.ClaimAllArgs(options::OPT_emit_llvm);
 }
 
@@ -3704,15 +3844,18 @@ ObjCRuntime Clang::AddObjCRuntimeArgs(const ArgList &args,
 void Clang::AddClangCLArgs(const ArgList &Args, ArgStringList &CmdArgs) const {
   unsigned RTOptionID = options::OPT__SLASH_MT;
 
-  if (Arg *A = Args.getLastArg(options::OPT__SLASH_MD,
-                               options::OPT__SLASH_MDd,
-                               options::OPT__SLASH_MT,
-                               options::OPT__SLASH_MTd)) {
+  if (Args.hasArg(options::OPT__SLASH_LDd))
+    // The /LDd option implies /MTd. The dependent lib part can be overridden,
+    // but defining _DEBUG is sticky.
+    RTOptionID = options::OPT__SLASH_MTd;
+
+  if (Arg *A = Args.getLastArg(options::OPT__SLASH_M_Group))
     RTOptionID = A->getOption().getID();
-  }
 
   switch(RTOptionID) {
     case options::OPT__SLASH_MD:
+      if (Args.hasArg(options::OPT__SLASH_LDd))
+        CmdArgs.push_back("-D_DEBUG");
       CmdArgs.push_back("-D_MT");
       CmdArgs.push_back("-D_DLL");
       CmdArgs.push_back("--dependent-lib=msvcrt");
@@ -3724,6 +3867,8 @@ void Clang::AddClangCLArgs(const ArgList &Args, ArgStringList &CmdArgs) const {
       CmdArgs.push_back("--dependent-lib=msvcrtd");
       break;
     case options::OPT__SLASH_MT:
+      if (Args.hasArg(options::OPT__SLASH_LDd))
+        CmdArgs.push_back("-D_DEBUG");
       CmdArgs.push_back("-D_MT");
       CmdArgs.push_back("--dependent-lib=libcmt");
       break;
@@ -3747,6 +3892,14 @@ void Clang::AddClangCLArgs(const ArgList &Args, ArgStringList &CmdArgs) const {
 
   if (Arg *A = Args.getLastArg(options::OPT_show_includes))
     A->render(Args, CmdArgs);
+
+  if (!Args.hasArg(options::OPT_fdiagnostics_format_EQ)) {
+    CmdArgs.push_back("-fdiagnostics-format");
+    if (Args.hasArg(options::OPT__SLASH_fallback))
+      CmdArgs.push_back("msvc-fallback");
+    else
+      CmdArgs.push_back("msvc");
+  }
 }
 
 void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
@@ -3763,8 +3916,6 @@ void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
   Args.ClaimAllArgs(options::OPT_w);
   // and "clang -emit-llvm -c foo.s"
   Args.ClaimAllArgs(options::OPT_emit_llvm);
-  // and "clang -use-gold-plugin -c foo.s"
-  Args.ClaimAllArgs(options::OPT_use_gold_plugin);
 
   // Invoke ourselves in -cc1as mode.
   //
@@ -3867,7 +4018,7 @@ void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
   // creating an object.
   // TODO: Currently only works on linux with newer objcopy.
   if (Args.hasArg(options::OPT_gsplit_dwarf) &&
-      (getToolChain().getTriple().getOS() == llvm::Triple::Linux))
+      getToolChain().getTriple().isOSLinux())
     SplitDebugInfo(getToolChain(), C, *this, JA, Args, Output,
                    SplitDebugName(Args, Inputs));
 }
@@ -4281,10 +4432,7 @@ void hexagon::Link::ConstructJob(Compilation &C, const JobAction &JA,
   }
 
   std::string Linker = ToolChain.GetProgramPath("hexagon-ld");
-  C.addCommand(
-    new Command(
-      JA, *this,
-      Args.MakeArgString(Linker), CmdArgs));
+  C.addCommand(new Command(JA, *this, Args.MakeArgString(Linker), CmdArgs));
 }
 // Hexagon tools end.
 
@@ -4678,7 +4826,6 @@ void darwin::Link::ConstructJob(Compilation &C, const JobAction &JA,
   Args.AddAllArgs(CmdArgs, options::OPT_Z_Flag);
   Args.AddAllArgs(CmdArgs, options::OPT_u_Group);
   Args.AddLastArg(CmdArgs, options::OPT_e);
-  Args.AddAllArgs(CmdArgs, options::OPT_m_Separate);
   Args.AddAllArgs(CmdArgs, options::OPT_r);
 
   // Forward -ObjC when either -ObjC or -ObjC++ is used, to force loading
@@ -4782,20 +4929,6 @@ void darwin::Link::ConstructJob(Compilation &C, const JobAction &JA,
   }
 
   Args.AddAllArgs(CmdArgs, options::OPT_L);
-
-  const SanitizerArgs &Sanitize =
-      getToolChain().getDriver().getOrParseSanitizerArgs(Args);
-  // If we're building a dynamic lib with -fsanitize=address,
-  // unresolved symbols may appear. Mark all
-  // of them as dynamic_lookup. Linking executables is handled in
-  // lib/Driver/ToolChains.cpp.
-  if (Sanitize.needsAsanRt()) {
-    if (Args.hasArg(options::OPT_dynamiclib) ||
-        Args.hasArg(options::OPT_bundle)) {
-      CmdArgs.push_back("-undefined");
-      CmdArgs.push_back("dynamic_lookup");
-    }
-  }
 
   if (Args.hasArg(options::OPT_fopenmp))
     // This is more complicated in gcc...
@@ -4961,18 +5094,17 @@ void solaris::Link::ConstructJob(Compilation &C, const JobAction &JA,
   std::string LibPath = "/usr/lib/";
   llvm::Triple::ArchType Arch = T.getArch();
   switch (Arch) {
-        case llvm::Triple::x86:
-          GCCLibPath += ("i386-" + T.getVendorName() + "-" +
-              T.getOSName()).str() + "/4.5.2/";
-          break;
-        case llvm::Triple::x86_64:
-          GCCLibPath += ("i386-" + T.getVendorName() + "-" +
-              T.getOSName()).str();
-          GCCLibPath += "/4.5.2/amd64/";
-          LibPath += "amd64/";
-          break;
-        default:
-          assert(0 && "Unsupported architecture");
+  case llvm::Triple::x86:
+    GCCLibPath +=
+        ("i386-" + T.getVendorName() + "-" + T.getOSName()).str() + "/4.5.2/";
+    break;
+  case llvm::Triple::x86_64:
+    GCCLibPath += ("i386-" + T.getVendorName() + "-" + T.getOSName()).str();
+    GCCLibPath += "/4.5.2/amd64/";
+    LibPath += "amd64/";
+    break;
+  default:
+    llvm_unreachable("Unsupported architecture");
   }
 
   ArgStringList CmdArgs;
@@ -5427,23 +5559,21 @@ void bitrig::Link::ConstructJob(Compilation &C, const JobAction &JA,
         CmdArgs.push_back("-lc");
     }
 
-    std::string myarch = "-lclang_rt.";
-    const llvm::Triple &T = getToolChain().getTriple();
-    llvm::Triple::ArchType Arch = T.getArch();
-    switch (Arch) {
-          case llvm::Triple::arm:
-            myarch += ("arm");
-            break;
-          case llvm::Triple::x86:
-            myarch += ("i386");
-            break;
-          case llvm::Triple::x86_64:
-            myarch += ("amd64");
-            break;
-          default:
-            assert(0 && "Unsupported architecture");
-     }
-     CmdArgs.push_back(Args.MakeArgString(myarch));
+    StringRef MyArch;
+    switch (getToolChain().getTriple().getArch()) {
+    case llvm::Triple::arm:
+      MyArch = "arm";
+      break;
+    case llvm::Triple::x86:
+      MyArch = "i386";
+      break;
+    case llvm::Triple::x86_64:
+      MyArch = "amd64";
+      break;
+    default:
+      llvm_unreachable("Unsupported architecture");
+    }
+    CmdArgs.push_back(Args.MakeArgString("-lclang_rt." + MyArch));
   }
 
   if (!Args.hasArg(options::OPT_nostdlib) &&
@@ -5812,34 +5942,39 @@ void netbsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
 
   AddLinkerInputs(getToolChain(), Inputs, Args, CmdArgs);
 
+  unsigned Major, Minor, Micro;
+  getToolChain().getTriple().getOSVersion(Major, Minor, Micro);
+  bool useLibgcc = true;
+  if (Major >= 7 || (Major == 6 && Minor == 99 && Micro >= 23) || Major == 0) {
+    if (getToolChain().getArch() == llvm::Triple::x86 ||
+        getToolChain().getArch() == llvm::Triple::x86_64)
+      useLibgcc = false;
+  }
+
   if (!Args.hasArg(options::OPT_nostdlib) &&
       !Args.hasArg(options::OPT_nodefaultlibs)) {
     if (D.CCCIsCXX()) {
       getToolChain().AddCXXStdlibLibArgs(Args, CmdArgs);
       CmdArgs.push_back("-lm");
     }
-    // FIXME: For some reason GCC passes -lgcc and -lgcc_s before adding
-    // the default system libraries. Just mimic this for now.
-    if (Args.hasArg(options::OPT_static)) {
-      CmdArgs.push_back("-lgcc_eh");
-    } else {
-      CmdArgs.push_back("--as-needed");
-      CmdArgs.push_back("-lgcc_s");
-      CmdArgs.push_back("--no-as-needed");
-    }
-    CmdArgs.push_back("-lgcc");
-
     if (Args.hasArg(options::OPT_pthread))
       CmdArgs.push_back("-lpthread");
     CmdArgs.push_back("-lc");
 
-    CmdArgs.push_back("-lgcc");
-    if (Args.hasArg(options::OPT_static)) {
-      CmdArgs.push_back("-lgcc_eh");
-    } else {
-      CmdArgs.push_back("--as-needed");
-      CmdArgs.push_back("-lgcc_s");
-      CmdArgs.push_back("--no-as-needed");
+    if (useLibgcc) {
+      if (Args.hasArg(options::OPT_static)) {
+        // libgcc_eh depends on libc, so resolve as much as possible,
+        // pull in any new requirements from libc and then get the rest
+        // of libgcc.
+        CmdArgs.push_back("-lgcc_eh");
+        CmdArgs.push_back("-lc");
+        CmdArgs.push_back("-lgcc");
+      } else {
+        CmdArgs.push_back("-lgcc");
+        CmdArgs.push_back("--as-needed");
+        CmdArgs.push_back("-lgcc_s");
+        CmdArgs.push_back("--no-as-needed");
+      }
     }
   }
 
@@ -5890,6 +6025,8 @@ void gnutools::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
     StringRef MArch = getToolChain().getArchName();
     if (MArch == "armv7" || MArch == "armv7a" || MArch == "armv7-a")
       CmdArgs.push_back("-mfpu=neon");
+    if (MArch == "armv8" || MArch == "armv8a" || MArch == "armv8-a")
+      CmdArgs.push_back("-mfpu=crypto-neon-fp-armv8");
 
     StringRef ARMFloatABI = getARMFloatABI(getToolChain().getDriver(), Args,
                                            getToolChain().getTriple());
@@ -5917,6 +6054,11 @@ void gnutools::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
       CmdArgs.push_back("-EB");
     else
       CmdArgs.push_back("-EL");
+
+    if (Arg *A = Args.getLastArg(options::OPT_mnan_EQ)) {
+      if (StringRef(A->getValue()) == "2008")
+        CmdArgs.push_back(Args.MakeArgString("-mnan=2008"));
+    }
 
     Args.AddLastArg(CmdArgs, options::OPT_mips16, options::OPT_mno_mips16);
     Args.AddLastArg(CmdArgs, options::OPT_mmicromips,
@@ -5962,7 +6104,7 @@ void gnutools::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
   // creating an object.
   // TODO: Currently only works on linux with newer objcopy.
   if (Args.hasArg(options::OPT_gsplit_dwarf) &&
-      (getToolChain().getTriple().getOS() == llvm::Triple::Linux))
+      getToolChain().getTriple().isOSLinux())
     SplitDebugInfo(getToolChain(), C, *this, JA, Args, Output,
                    SplitDebugName(Args, Inputs));
 }
@@ -6048,10 +6190,10 @@ void gnutools::Link::ConstructJob(Compilation &C, const JobAction &JA,
   const Driver &D = ToolChain.getDriver();
   const bool isAndroid =
     ToolChain.getTriple().getEnvironment() == llvm::Triple::Android;
-  const SanitizerArgs &Sanitize = D.getOrParseSanitizerArgs(Args);
+  const SanitizerArgs &Sanitize = ToolChain.getSanitizerArgs();
   const bool IsPIE =
     !Args.hasArg(options::OPT_shared) &&
-    (Args.hasArg(options::OPT_pie) || Sanitize.hasZeroBaseShadow(ToolChain));
+    (Args.hasArg(options::OPT_pie) || Sanitize.hasZeroBaseShadow());
 
   ArgStringList CmdArgs;
 
@@ -6186,7 +6328,7 @@ void gnutools::Link::ConstructJob(Compilation &C, const JobAction &JA,
   // Tell the linker to load the plugin. This has to come before AddLinkerInputs
   // as gold requires -plugin to come before any -plugin-opt that -Wl might
   // forward.
-  if (D.IsUsingLTO(Args) || Args.hasArg(options::OPT_use_gold_plugin)) {
+  if (D.IsUsingLTO(Args)) {
     CmdArgs.push_back("-plugin");
     std::string Plugin = ToolChain.getDriver().Dir + "/../lib/LLVMgold.so";
     CmdArgs.push_back(Args.MakeArgString(Plugin));
@@ -6571,13 +6713,28 @@ void visualstudio::Link::ConstructJob(Compilation &C, const JobAction &JA,
 
   CmdArgs.push_back("-nologo");
 
-  if (getToolChain().getDriver().getOrParseSanitizerArgs(Args).needsAsanRt()) {
+  bool DLL = Args.hasArg(options::OPT__SLASH_LD, options::OPT__SLASH_LDd);
+
+  if (DLL) {
+    CmdArgs.push_back(Args.MakeArgString("-dll"));
+
+    SmallString<128> ImplibName(Output.getFilename());
+    llvm::sys::path::replace_extension(ImplibName, "lib");
+    CmdArgs.push_back(Args.MakeArgString(std::string("-implib:") +
+                                         ImplibName.str()));
+  }
+
+  if (getToolChain().getSanitizerArgs().needsAsanRt()) {
     CmdArgs.push_back(Args.MakeArgString("-debug"));
     CmdArgs.push_back(Args.MakeArgString("-incremental:no"));
     SmallString<128> LibSanitizer(getToolChain().getDriver().ResourceDir);
-    // FIXME: Handle 64-bit. Use asan_dll_thunk.dll when building a DLL.
-    llvm::sys::path::append(
-        LibSanitizer, "lib", "windows", "clang_rt.asan-i386.lib");
+    llvm::sys::path::append(LibSanitizer, "lib", "windows");
+    if (DLL) {
+      llvm::sys::path::append(LibSanitizer, "clang_rt.asan_dll_thunk-i386.lib");
+    } else {
+      llvm::sys::path::append(LibSanitizer, "clang_rt.asan-i386.lib");
+    }
+    // FIXME: Handle 64-bit.
     CmdArgs.push_back(Args.MakeArgString(LibSanitizer));
   }
 
@@ -6595,5 +6752,177 @@ void visualstudio::Link::ConstructJob(Compilation &C, const JobAction &JA,
 
   const char *Exec =
     Args.MakeArgString(getToolChain().GetProgramPath("link.exe"));
+  C.addCommand(new Command(JA, *this, Exec, CmdArgs));
+}
+
+void visualstudio::Compile::ConstructJob(Compilation &C, const JobAction &JA,
+                                         const InputInfo &Output,
+                                         const InputInfoList &Inputs,
+                                         const ArgList &Args,
+                                         const char *LinkingOutput) const {
+  C.addCommand(GetCommand(C, JA, Output, Inputs, Args, LinkingOutput));
+}
+
+// Try to find FallbackName on PATH that is not identical to ClangProgramPath.
+// If one cannot be found, return FallbackName.
+// We do this special search to prevent clang-cl from falling back onto itself
+// if it's available as cl.exe on the path.
+static std::string FindFallback(const char *FallbackName,
+                                const char *ClangProgramPath) {
+  llvm::Optional<std::string> OptPath = llvm::sys::Process::GetEnv("PATH");
+  if (!OptPath.hasValue())
+    return FallbackName;
+
+#ifdef LLVM_ON_WIN32
+  const StringRef PathSeparators = ";";
+#else
+  const StringRef PathSeparators = ":";
+#endif
+
+  SmallVector<StringRef, 8> PathSegments;
+  llvm::SplitString(OptPath.getValue(), PathSegments, PathSeparators);
+
+  for (size_t i = 0, e = PathSegments.size(); i != e; ++i) {
+    const StringRef &PathSegment = PathSegments[i];
+    if (PathSegment.empty())
+      continue;
+
+    SmallString<128> FilePath(PathSegment);
+    llvm::sys::path::append(FilePath, FallbackName);
+    if (llvm::sys::fs::can_execute(Twine(FilePath)) &&
+        !llvm::sys::fs::equivalent(Twine(FilePath), ClangProgramPath))
+      return FilePath.str();
+  }
+
+  return FallbackName;
+}
+
+Command *visualstudio::Compile::GetCommand(Compilation &C, const JobAction &JA,
+                                           const InputInfo &Output,
+                                           const InputInfoList &Inputs,
+                                           const ArgList &Args,
+                                           const char *LinkingOutput) const {
+  ArgStringList CmdArgs;
+  CmdArgs.push_back("/nologo");
+  CmdArgs.push_back("/c"); // Compile only.
+  CmdArgs.push_back("/W0"); // No warnings.
+
+  // The goal is to be able to invoke this tool correctly based on
+  // any flag accepted by clang-cl.
+
+  // These are spelled the same way in clang and cl.exe,.
+  Args.AddAllArgs(CmdArgs, options::OPT_D, options::OPT_U);
+  Args.AddAllArgs(CmdArgs, options::OPT_I);
+
+  // Optimization level.
+  if (Arg *A = Args.getLastArg(options::OPT_O, options::OPT_O0)) {
+    if (A->getOption().getID() == options::OPT_O0) {
+      CmdArgs.push_back("/Od");
+    } else {
+      StringRef OptLevel = A->getValue();
+      if (OptLevel == "1" || OptLevel == "2" || OptLevel == "s")
+        A->render(Args, CmdArgs);
+      else if (OptLevel == "3")
+        CmdArgs.push_back("/Ox");
+    }
+  }
+
+  // Flags for which clang-cl have an alias.
+  // FIXME: How can we ensure this stays in sync with relevant clang-cl options?
+
+  if (Arg *A = Args.getLastArg(options::OPT_frtti, options::OPT_fno_rtti))
+    CmdArgs.push_back(A->getOption().getID() == options::OPT_frtti ? "/GR"
+                                                                   : "/GR-");
+  if (Args.hasArg(options::OPT_fsyntax_only))
+    CmdArgs.push_back("/Zs");
+
+  std::vector<std::string> Includes = Args.getAllArgValues(options::OPT_include);
+  for (size_t I = 0, E = Includes.size(); I != E; ++I)
+    CmdArgs.push_back(Args.MakeArgString(std::string("/FI") + Includes[I]));
+
+  // Flags that can simply be passed through.
+  Args.AddAllArgs(CmdArgs, options::OPT__SLASH_LD);
+  Args.AddAllArgs(CmdArgs, options::OPT__SLASH_LDd);
+
+  // The order of these flags is relevant, so pick the last one.
+  if (Arg *A = Args.getLastArg(options::OPT__SLASH_MD, options::OPT__SLASH_MDd,
+                               options::OPT__SLASH_MT, options::OPT__SLASH_MTd))
+    A->render(Args, CmdArgs);
+
+
+  // Input filename.
+  assert(Inputs.size() == 1);
+  const InputInfo &II = Inputs[0];
+  assert(II.getType() == types::TY_C || II.getType() == types::TY_CXX);
+  CmdArgs.push_back(II.getType() == types::TY_C ? "/Tc" : "/Tp");
+  if (II.isFilename())
+    CmdArgs.push_back(II.getFilename());
+  else
+    II.getInputArg().renderAsInput(Args, CmdArgs);
+
+  // Output filename.
+  assert(Output.getType() == types::TY_Object);
+  const char *Fo = Args.MakeArgString(std::string("/Fo") +
+                                      Output.getFilename());
+  CmdArgs.push_back(Fo);
+
+  const Driver &D = getToolChain().getDriver();
+  std::string Exec = FindFallback("cl.exe", D.getClangProgramPath());
+
+  return new Command(JA, *this, Args.MakeArgString(Exec), CmdArgs);
+}
+
+
+/// XCore Tools
+// We pass assemble and link construction to the xcc tool.
+
+void XCore::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
+                                       const InputInfo &Output,
+                                       const InputInfoList &Inputs,
+                                       const ArgList &Args,
+                                       const char *LinkingOutput) const {
+  ArgStringList CmdArgs;
+
+  CmdArgs.push_back("-o");
+  CmdArgs.push_back(Output.getFilename());
+
+  CmdArgs.push_back("-c");
+
+  if (Args.hasArg(options::OPT_g_Group)) {
+    CmdArgs.push_back("-g");
+  }
+
+  Args.AddAllArgValues(CmdArgs, options::OPT_Wa_COMMA,
+                       options::OPT_Xassembler);
+
+  for (InputInfoList::const_iterator
+       it = Inputs.begin(), ie = Inputs.end(); it != ie; ++it) {
+    const InputInfo &II = *it;
+    CmdArgs.push_back(II.getFilename());
+  }
+
+  const char *Exec =
+    Args.MakeArgString(getToolChain().GetProgramPath("xcc"));
+  C.addCommand(new Command(JA, *this, Exec, CmdArgs));
+}
+
+void XCore::Link::ConstructJob(Compilation &C, const JobAction &JA,
+                                   const InputInfo &Output,
+                                   const InputInfoList &Inputs,
+                                   const ArgList &Args,
+                                   const char *LinkingOutput) const {
+  ArgStringList CmdArgs;
+
+  if (Output.isFilename()) {
+    CmdArgs.push_back("-o");
+    CmdArgs.push_back(Output.getFilename());
+  } else {
+    assert(Output.isNothing() && "Invalid output.");
+  }
+
+  AddLinkerInputs(getToolChain(), Inputs, Args, CmdArgs);
+
+  const char *Exec =
+    Args.MakeArgString(getToolChain().GetProgramPath("xcc"));
   C.addCommand(new Command(JA, *this, Exec, CmdArgs));
 }

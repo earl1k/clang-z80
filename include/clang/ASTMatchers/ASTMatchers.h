@@ -86,6 +86,16 @@ public:
   }
   /// @}
 
+  /// \brief Type of mapping from binding identifiers to bound nodes. This type
+  /// is an associative container with a key type of \c std::string and a value
+  /// type of \c clang::ast_type_traits::DynTypedNode
+  typedef internal::BoundNodesMap::IDToNodeMap IDToNodeMap;
+
+  /// \brief Retrieve mapping from binding identifiers to bound nodes.
+  const IDToNodeMap &getMap() const {
+    return MyBoundNodes.getMap();
+  }
+
 private:
   /// \brief Create BoundNodes from a pre-filled map of bindings.
   BoundNodes(internal::BoundNodesMap &MyBoundNodes)
@@ -1269,6 +1279,16 @@ const internal::VariadicDynCastAllOfMatcher<
   Stmt,
   CXXFunctionalCastExpr> functionalCastExpr;
 
+/// \brief Matches functional cast expressions having N != 1 arguments
+///
+/// Example: Matches Foo(bar, bar)
+/// \code
+///   Foo h = Foo(bar, bar);
+/// \endcode
+const internal::VariadicDynCastAllOfMatcher<
+  Stmt,
+  CXXTemporaryObjectExpr> temporaryObjectExpr;
+
 /// \brief Matches \c QualTypes in the clang AST.
 const internal::VariadicAllOfMatcher<QualType> qualType;
 
@@ -1527,7 +1547,8 @@ AST_MATCHER_P(CXXRecordDecl, hasMethod, internal::Matcher<CXXMethodDecl>,
 /// ChildT must be an AST base type.
 ///
 /// Usable as: Any Matcher
-const internal::ArgumentAdaptingMatcherFunc<internal::HasMatcher> has = {};
+const internal::ArgumentAdaptingMatcherFunc<internal::HasMatcher>
+LLVM_ATTRIBUTE_UNUSED has = {};
 
 /// \brief Matches AST nodes that have descendant AST nodes that match the
 /// provided matcher.
@@ -1544,7 +1565,7 @@ const internal::ArgumentAdaptingMatcherFunc<internal::HasMatcher> has = {};
 ///
 /// Usable as: Any Matcher
 const internal::ArgumentAdaptingMatcherFunc<internal::HasDescendantMatcher>
-hasDescendant = {};
+LLVM_ATTRIBUTE_UNUSED hasDescendant = {};
 
 /// \brief Matches AST nodes that have child AST nodes that match the
 /// provided matcher.
@@ -1562,8 +1583,8 @@ hasDescendant = {};
 /// matches instead of only on the first one.
 ///
 /// Usable as: Any Matcher
-const internal::ArgumentAdaptingMatcherFunc<internal::ForEachMatcher> forEach =
-    {};
+const internal::ArgumentAdaptingMatcherFunc<internal::ForEachMatcher>
+LLVM_ATTRIBUTE_UNUSED forEach = {};
 
 /// \brief Matches AST nodes that have descendant AST nodes that match the
 /// provided matcher.
@@ -1590,7 +1611,7 @@ const internal::ArgumentAdaptingMatcherFunc<internal::ForEachMatcher> forEach =
 ///
 /// Usable as: Any Matcher
 const internal::ArgumentAdaptingMatcherFunc<internal::ForEachDescendantMatcher>
-forEachDescendant = {};
+LLVM_ATTRIBUTE_UNUSED forEachDescendant = {};
 
 /// \brief Matches if the node or any descendant matches.
 ///
@@ -1624,7 +1645,7 @@ internal::Matcher<T> findAll(const internal::Matcher<T> &Matcher) {
 /// Usable as: Any Matcher
 const internal::ArgumentAdaptingMatcherFunc<
     internal::HasParentMatcher, internal::TypeList<Decl, Stmt>,
-    internal::TypeList<Decl, Stmt> > hasParent = {};
+    internal::TypeList<Decl, Stmt> > LLVM_ATTRIBUTE_UNUSED hasParent = {};
 
 /// \brief Matches AST nodes that have an ancestor that matches the provided
 /// matcher.
@@ -1639,7 +1660,7 @@ const internal::ArgumentAdaptingMatcherFunc<
 /// Usable as: Any Matcher
 const internal::ArgumentAdaptingMatcherFunc<
     internal::HasAncestorMatcher, internal::TypeList<Decl, Stmt>,
-    internal::TypeList<Decl, Stmt> > hasAncestor = {};
+    internal::TypeList<Decl, Stmt> > LLVM_ATTRIBUTE_UNUSED hasAncestor = {};
 
 /// \brief Matches if the provided matcher does not match.
 ///
@@ -2099,7 +2120,7 @@ AST_MATCHER_P(CXXCtorInitializer, withInitializer,
       InnerMatcher.matches(*NodeAsExpr, Finder, Builder));
 }
 
-/// \brief Matches a contructor initializer if it is explicitly written in
+/// \brief Matches a constructor initializer if it is explicitly written in
 /// code (as opposed to implicitly added by the compiler).
 ///
 /// Given
@@ -2296,7 +2317,7 @@ AST_POLYMORPHIC_MATCHER_P(equalsBoundNode, AST_POLYMORPHIC_SUPPORTED_TYPES_4(
 /// \code
 ///   if (A* a = GetAPointer()) {}
 /// \endcode
-/// hasConditionVariableStatment(...)
+/// hasConditionVariableStatement(...)
 ///   matches 'A* a = GetAPointer()'.
 AST_MATCHER_P(IfStmt, hasConditionVariableStatement,
               internal::Matcher<DeclStmt>, InnerMatcher) {

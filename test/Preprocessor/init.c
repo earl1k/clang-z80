@@ -49,6 +49,14 @@
 // C99:#define __STRICT_ANSI__ 1
 //
 // 
+// RUN: %clang_cc1 -std=c11 -E -dM < /dev/null | FileCheck -check-prefix C11 %s
+//
+// C11:#define __STDC_UTF_16__ 1
+// C11:#define __STDC_UTF_32__ 1
+// C11:#define __STDC_VERSION__ 201112L
+// C11:#define __STRICT_ANSI__ 1
+//
+// 
 // RUN: %clang_cc1 -E -dM < /dev/null | FileCheck -check-prefix COMMON %s
 //
 // COMMON:#define __CONSTANT_CFSTRINGS__ 1
@@ -144,7 +152,7 @@
 // NONFRAGILE:#define __OBJC2__ 1
 //
 //
-// RUN: %clang_cc1 -O0 -E -dM < /dev/null | FileCheck -check-prefix O0 %s
+// RUN: %clang_cc1 -E -dM < /dev/null | FileCheck -check-prefix O0 %s
 //
 // O0:#define __NO_INLINE__ 1
 // O0-NOT:#define __OPTIMIZE_SIZE__
@@ -504,6 +512,26 @@
 // ARMEABIHARDFP:#define __arm 1
 // ARMEABIHARDFP:#define __arm__ 1
 
+// Check that -mhwdiv works properly for targets which don't have the hwdiv feature enabled by default.
+
+// RUN: %clang -target arm -mhwdiv=arm -x c -E -dM %s -o - | FileCheck --check-prefix=ARMHWDIV-ARM %s
+// ARMHWDIV-ARM:#define __ARM_ARCH_EXT_IDIV__ 1
+
+// RUN: %clang -target arm -mthumb -mhwdiv=thumb -x c -E -dM %s -o - | FileCheck --check-prefix=THUMBHWDIV-THUMB %s
+// THUMBHWDIV-THUMB:#define __ARM_ARCH_EXT_IDIV__ 1
+
+// RUN: %clang -target arm -x c -E -dM %s -o - | FileCheck --check-prefix=ARM-FALSE %s
+// ARM-FALSE-NOT:#define __ARM_ARCH_EXT_IDIV__
+
+// RUN: %clang -target arm -mthumb -x c -E -dM %s -o - | FileCheck --check-prefix=THUMB-FALSE %s
+// THUMB-FALSE-NOT:#define __ARM_ARCH_EXT_IDIV__
+
+// RUN: %clang -target arm -mhwdiv=thumb -x c -E -dM %s -o - | FileCheck --check-prefix=THUMBHWDIV-ARM-FALSE %s
+// THUMBHWDIV-ARM-FALSE-NOT:#define __ARM_ARCH_EXT_IDIV__
+
+// RUN: %clang -target arm -mthumb -mhwdiv=arm -x c -E -dM %s -o - | FileCheck --check-prefix=ARMHWDIV-THUMB-FALSE %s
+// ARMHWDIV-THUMB-FALSE-NOT:#define __ARM_ARCH_EXT_IDIV__
+
 //
 // RUN: %clang_cc1 -E -dM -ffreestanding -triple=i386-none-none < /dev/null | FileCheck -check-prefix I386 %s
 //
@@ -709,6 +737,7 @@
 // MIPS32BE:#define _MIPSEB 1
 // MIPS32BE:#define _MIPS_ARCH "mips32"
 // MIPS32BE:#define _MIPS_ARCH_MIPS32 1
+// MIPS32BE:#define _MIPS_FPSET 16
 // MIPS32BE:#define _MIPS_SIM _ABIO32
 // MIPS32BE:#define _MIPS_SZINT 32
 // MIPS32BE:#define _MIPS_SZLONG 32
@@ -813,6 +842,7 @@
 // MIPS32BE:#define __llvm__ 1
 // MIPS32BE:#define __mips 1
 // MIPS32BE:#define __mips__ 1
+// MIPS32BE:#define __mips_fpr 32
 // MIPS32BE:#define __mips_hard_float 1
 // MIPS32BE:#define __mips_o32 1
 // MIPS32BE:#define _mips 1
@@ -826,6 +856,7 @@
 // MIPS32EL:#define _MIPSEL 1
 // MIPS32EL:#define _MIPS_ARCH "mips32"
 // MIPS32EL:#define _MIPS_ARCH_MIPS32 1
+// MIPS32EL:#define _MIPS_FPSET 16
 // MIPS32EL:#define _MIPS_SIM _ABIO32
 // MIPS32EL:#define _MIPS_SZINT 32
 // MIPS32EL:#define _MIPS_SZLONG 32
@@ -927,6 +958,7 @@
 // MIPS32EL:#define __llvm__ 1
 // MIPS32EL:#define __mips 1
 // MIPS32EL:#define __mips__ 1
+// MIPS32EL:#define __mips_fpr 32
 // MIPS32EL:#define __mips_hard_float 1
 // MIPS32EL:#define __mips_o32 1
 // MIPS32EL:#define _mips 1
@@ -940,6 +972,7 @@
 // MIPS64BE:#define _MIPSEB 1
 // MIPS64BE:#define _MIPS_ARCH "mips64"
 // MIPS64BE:#define _MIPS_ARCH_MIPS64 1
+// MIPS64BE:#define _MIPS_FPSET 32
 // MIPS64BE:#define _MIPS_SIM _ABI64
 // MIPS64BE:#define _MIPS_SZINT 32
 // MIPS64BE:#define _MIPS_SZLONG 64
@@ -1043,6 +1076,7 @@
 // MIPS64BE:#define __mips64 1
 // MIPS64BE:#define __mips64__ 1
 // MIPS64BE:#define __mips__ 1
+// MIPS64BE:#define __mips_fpr 64
 // MIPS64BE:#define __mips_hard_float 1
 // MIPS64BE:#define __mips_n64 1
 // MIPS64BE:#define _mips 1
@@ -1056,6 +1090,7 @@
 // MIPS64EL:#define _MIPSEL 1
 // MIPS64EL:#define _MIPS_ARCH "mips64"
 // MIPS64EL:#define _MIPS_ARCH_MIPS64 1
+// MIPS64EL:#define _MIPS_FPSET 32
 // MIPS64EL:#define _MIPS_SIM _ABI64
 // MIPS64EL:#define _MIPS_SZINT 32
 // MIPS64EL:#define _MIPS_SZLONG 64
@@ -1159,6 +1194,7 @@
 // MIPS64EL:#define __mips64 1
 // MIPS64EL:#define __mips64__ 1
 // MIPS64EL:#define __mips__ 1
+// MIPS64EL:#define __mips_fpr 64
 // MIPS64EL:#define __mips_hard_float 1
 // MIPS64EL:#define __mips_n64 1
 // MIPS64EL:#define _mips 1
@@ -1228,6 +1264,41 @@
 // RUN:   -E -dM -triple=mips-none-none < /dev/null \
 // RUN:   | FileCheck -check-prefix MIPS-MSA %s
 // MIPS-MSA:#define __mips_msa 1
+//
+// RUN: %clang_cc1 -target-feature +nan2008 \
+// RUN:   -E -dM -triple=mips-none-none < /dev/null \
+// RUN:   | FileCheck -check-prefix MIPS-NAN2008 %s
+// MIPS-NAN2008:#define __mips_nan2008 1
+//
+// RUN: %clang_cc1 -target-feature -fp64 \
+// RUN:   -E -dM -triple=mips-none-none < /dev/null \
+// RUN:   | FileCheck -check-prefix MIPS32-MFP32 %s
+// MIPS32-MFP32:#define _MIPS_FPSET 16
+// MIPS32-MFP32:#define __mips_fpr 32
+//
+// RUN: %clang_cc1 -target-feature +fp64 \
+// RUN:   -E -dM -triple=mips-none-none < /dev/null \
+// RUN:   | FileCheck -check-prefix MIPS32-MFP64 %s
+// MIPS32-MFP64:#define _MIPS_FPSET 32
+// MIPS32-MFP64:#define __mips_fpr 64
+//
+// RUN: %clang_cc1 -target-feature +single-float \
+// RUN:   -E -dM -triple=mips-none-none < /dev/null \
+// RUN:   | FileCheck -check-prefix MIPS32-MFP32SF %s
+// MIPS32-MFP32SF:#define _MIPS_FPSET 32
+// MIPS32-MFP32SF:#define __mips_fpr 32
+//
+// RUN: %clang_cc1 -target-feature +fp64 \
+// RUN:   -E -dM -triple=mips64-none-none < /dev/null \
+// RUN:   | FileCheck -check-prefix MIPS64-MFP64 %s
+// MIPS64-MFP64:#define _MIPS_FPSET 32
+// MIPS64-MFP64:#define __mips_fpr 64
+//
+// RUN: %clang_cc1 -target-feature -fp64 -target-feature +single-float \
+// RUN:   -E -dM -triple=mips64-none-none < /dev/null \
+// RUN:   | FileCheck -check-prefix MIPS64-NOMFP64 %s
+// MIPS64-NOMFP64:#define _MIPS_FPSET 32
+// MIPS64-NOMFP64:#define __mips_fpr 32
 //
 // RUN: %clang_cc1 -E -dM -ffreestanding -triple=msp430-none-none < /dev/null | FileCheck -check-prefix MSP430 %s
 //
@@ -2920,6 +2991,12 @@
 // X86_64-LINUX:#define __x86_64 1
 // X86_64-LINUX:#define __x86_64__ 1
 //
+// RUN: %clang_cc1 -E -dM -ffreestanding -triple=x86_64-unknown-freebsd9.1 < /dev/null | FileCheck -check-prefix X86_64-FREEBSD %s
+//
+// X86_64-FREEBSD:#define __FreeBSD__ 9
+// X86_64-FREEBSD:#define __FreeBSD_cc_version 900001
+// X86_64-FREEBSD:#define __STDC_MB_MIGHT_NEQ_WC__ 1
+//
 // RUN: %clang_cc1 -E -dM -ffreestanding -triple=sparc64-none-none < /dev/null | FileCheck -check-prefix SPARCV9 %s
 // SPARCV9:#define __INT64_TYPE__ long int
 // SPARCV9:#define __INTMAX_TYPE__ long int
@@ -2934,9 +3011,17 @@
 // SPARC64-OBSD:#define __INTMAX_TYPE__ long long int
 // SPARC64-OBSD:#define __UINTMAX_TYPE__ long long unsigned int
 //
+// RUN: %clang_cc1 -E -dM -ffreestanding -triple=x86_64-pc-kfreebsd-gnu < /dev/null | FileCheck -check-prefix KFREEBSD-DEFINE %s
+// KFREEBSD-DEFINE:#define __FreeBSD_kernel__ 1
+// KFREEBSD-DEFINE:#define __GLIBC__ 1
+//
+// RUN: %clang_cc1 -E -dM -ffreestanding -triple=i686-pc-kfreebsd-gnu < /dev/null | FileCheck -check-prefix KFREEBSDI686-DEFINE %s
+// KFREEBSDI686-DEFINE:#define __FreeBSD_kernel__ 1
+// KFREEBSDI686-DEFINE:#define __GLIBC__ 1
+//
 // RUN: %clang_cc1 -x c++ -triple i686-pc-linux-gnu -fobjc-runtime=gcc -E -dM < /dev/null | FileCheck -check-prefix GNUSOURCE %s
 // GNUSOURCE:#define _GNU_SOURCE 1
-// 
+//
 // RUN: %clang_cc1 -x c++ -std=c++98 -fno-rtti -E -dM < /dev/null | FileCheck -check-prefix NORTTI %s
 // NORTTI: __GXX_ABI_VERSION
 // NORTTI-NOT:#define __GXX_RTTI
@@ -2944,6 +3029,7 @@
 //
 // RUN: %clang_cc1 -triple arm-linux-androideabi -E -dM < /dev/null | FileCheck -check-prefix ANDROID %s
 // ANDROID: __ANDROID__ 1
+//
 // RUN: %clang_cc1 -E -dM -ffreestanding -triple=powerpc64-unknown-freebsd < /dev/null | FileCheck -check-prefix PPC64-FREEBSD %s
 // PPC64-FREEBSD-NOT: #define __LONG_DOUBLE_128__ 1
 //

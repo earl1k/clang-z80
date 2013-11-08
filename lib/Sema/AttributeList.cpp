@@ -19,6 +19,14 @@
 #include "llvm/ADT/StringSwitch.h"
 using namespace clang;
 
+IdentifierLoc *IdentifierLoc::create(ASTContext &Ctx, SourceLocation Loc,
+                                     IdentifierInfo *Ident) {
+  IdentifierLoc *Result = new (Ctx) IdentifierLoc;
+  Result->Loc = Loc;
+  Result->Ident = Ident;
+  return Result;
+}
+
 size_t AttributeList::allocated_size() const {
   if (IsAvailability) return AttributeFactory::AvailabilityAllocSize;
   else if (IsTypeTagForDatatype)
@@ -137,3 +145,28 @@ unsigned AttributeList::getAttributeSpellingListIndex() const {
 
 }
 
+struct ParsedAttrInfo {
+  unsigned NumArgs : 4;
+  unsigned OptArgs : 4;
+  unsigned HasCustomParsing : 1;
+};
+
+namespace {
+  #include "clang/Sema/AttrParsedAttrImpl.inc"
+}
+
+static const ParsedAttrInfo &getInfo(const AttributeList &A) {
+  return AttrInfoMap[A.getKind()];
+}
+
+unsigned AttributeList::getMinArgs() const {
+  return getInfo(*this).NumArgs;
+}
+
+unsigned AttributeList::getMaxArgs() const {
+  return getMinArgs() + getInfo(*this).OptArgs;
+}
+
+bool AttributeList::hasCustomParsing() const {
+  return getInfo(*this).HasCustomParsing;
+}

@@ -95,12 +95,16 @@ bool CodeGenModule::TryEmitBaseDestructorAsAlias(const CXXDestructorDecl *D) {
     return true;
 
   return TryEmitDefinitionAsAlias(GlobalDecl(D, Dtor_Base),
-                                  GlobalDecl(BaseD, Dtor_Base));
+                                  GlobalDecl(BaseD, Dtor_Base),
+                                  false);
 }
 
 /// Try to emit a definition as a global alias for another definition.
+/// If \p InEveryTU is true, we know that an equivalent alias can be produced
+/// in every translation unit.
 bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
-                                             GlobalDecl TargetDecl) {
+                                             GlobalDecl TargetDecl,
+                                             bool InEveryTU) {
   if (!getCodeGenOpts().CXXCtorDtorAliases)
     return true;
 
@@ -108,33 +112,20 @@ bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
   // support aliases with that linkage, fail.
   llvm::GlobalValue::LinkageTypes Linkage = getFunctionLinkage(AliasDecl);
 
-  switch (Linkage) {
-  // We can definitely emit aliases to definitions with external linkage.
-  case llvm::GlobalValue::ExternalLinkage:
-  case llvm::GlobalValue::ExternalWeakLinkage:
-    break;
-
-  // Same with local linkage.
-  case llvm::GlobalValue::InternalLinkage:
-  case llvm::GlobalValue::PrivateLinkage:
-  case llvm::GlobalValue::LinkerPrivateLinkage:
-    break;
-
-  // We should try to support linkonce linkages.
-  case llvm::GlobalValue::LinkOnceAnyLinkage:
-  case llvm::GlobalValue::LinkOnceODRLinkage:
+  // We can't use an alias if the linkage is not valid for one.
+  if (!llvm::GlobalAlias::isValidLinkage(Linkage))
     return true;
 
-  // Other linkages will probably never be supported.
-  default:
-    return true;
-  }
+  llvm::GlobalValue::LinkageTypes TargetLinkage =
+      getFunctionLinkage(TargetDecl);
 
-  llvm::GlobalValue::LinkageTypes TargetLinkage
-    = getFunctionLinkage(TargetDecl);
-
-  if (llvm::GlobalValue::isWeakForLinker(TargetLinkage))
-    return true;
+  // Check if we have it already.
+  StringRef MangledName = getMangledName(AliasDecl);
+  llvm::GlobalValue *Entry = GetGlobalValue(MangledName);
+  if (Entry && !Entry->isDeclaration())
+    return false;
+  if (Replacements.count(MangledName))
+    return false;
 
   // Derive the type for the alias.
   llvm::PointerType *AliasType
@@ -148,15 +139,28 @@ bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
   if (Ref->getType() != AliasType)
     Aliasee = llvm::ConstantExpr::getBitCast(Ref, AliasType);
 
+  // Don't create an alias to a linker weak symbol unless we know we can do
+  // that in every TU. This avoids producing different COMDATs in different
+  // TUs.
+  if (llvm::GlobalValue::isWeakForLinker(TargetLinkage)) {
+    if (!InEveryTU)
+      return true;
+
+    // Instead of creating as alias to a linkonce_odr, replace all of the uses
+    // of the aliassee.
+    if (Linkage == llvm::GlobalValue::LinkOnceODRLinkage) {
+      Replacements[MangledName] = Aliasee;
+      return false;
+    }
+    assert(Linkage == TargetLinkage);
+  }
+
   // Create the alias with no name.
   llvm::GlobalAlias *Alias = 
     new llvm::GlobalAlias(AliasType, Linkage, "", Aliasee, &getModule());
 
   // Switch any previous uses to the alias.
-  StringRef MangledName = getMangledName(AliasDecl);
-  llvm::GlobalValue *Entry = GetGlobalValue(MangledName);
   if (Entry) {
-    assert(Entry->isDeclaration() && "definition already exists for alias");
     assert(Entry->getType() == AliasType &&
            "declaration exists with different type");
     Alias->takeName(Entry);
@@ -177,11 +181,14 @@ void CodeGenModule::EmitCXXConstructor(const CXXConstructorDecl *ctor,
   // The complete constructor is equivalent to the base constructor
   // for classes with no virtual bases.  Try to emit it as an alias.
   if (getTarget().getCXXABI().hasConstructorVariants() &&
-      ctorType == Ctor_Complete &&
       !ctor->getParent()->getNumVBases() &&
-      !TryEmitDefinitionAsAlias(GlobalDecl(ctor, Ctor_Complete),
-                                GlobalDecl(ctor, Ctor_Base)))
-    return;
+      (ctorType == Ctor_Complete || ctorType == Ctor_Base)) {
+    bool ProducedAlias =
+        !TryEmitDefinitionAsAlias(GlobalDecl(ctor, Ctor_Complete),
+                                  GlobalDecl(ctor, Ctor_Base), true);
+    if (ctorType == Ctor_Complete && ProducedAlias)
+      return;
+  }
 
   const CGFunctionInfo &fnInfo =
     getTypes().arrangeCXXConstructorDeclaration(ctor, ctorType);
@@ -218,11 +225,18 @@ void CodeGenModule::EmitCXXDestructor(const CXXDestructorDecl *dtor,
                                       CXXDtorType dtorType) {
   // The complete destructor is equivalent to the base destructor for
   // classes with no virtual bases, so try to emit it as an alias.
-  if (dtorType == Dtor_Complete &&
-      !dtor->getParent()->getNumVBases() &&
-      !TryEmitDefinitionAsAlias(GlobalDecl(dtor, Dtor_Complete),
-                                GlobalDecl(dtor, Dtor_Base)))
-    return;
+  if (!dtor->getParent()->getNumVBases() &&
+      (dtorType == Dtor_Complete || dtorType == Dtor_Base)) {
+    bool ProducedAlias =
+        !TryEmitDefinitionAsAlias(GlobalDecl(dtor, Dtor_Complete),
+                                  GlobalDecl(dtor, Dtor_Base), true);
+    if (ProducedAlias) {
+      if (dtorType == Dtor_Complete)
+        return;
+      if (dtor->isVirtual())
+        getVTables().EmitThunks(GlobalDecl(dtor, Dtor_Complete));
+    }
+  }
 
   // The base destructor is equivalent to the base destructor of its
   // base class if there is exactly one non-virtual base class with a
@@ -280,13 +294,13 @@ static llvm::Value *BuildAppleKextVirtualCall(CodeGenFunction &CGF,
          "No kext in Microsoft ABI");
   GD = GD.getCanonicalDecl();
   CodeGenModule &CGM = CGF.CGM;
-  llvm::Value *VTable = CGM.getVTables().GetAddrOfVTable(RD);
+  llvm::Value *VTable = CGM.getCXXABI().getAddrOfVTable(RD, CharUnits());
   Ty = Ty->getPointerTo()->getPointerTo();
   VTable = CGF.Builder.CreateBitCast(VTable, Ty);
   assert(VTable && "BuildVirtualCall = kext vtbl pointer is null");
-  uint64_t VTableIndex = CGM.getVTableContext().getMethodVTableIndex(GD);
+  uint64_t VTableIndex = CGM.getItaniumVTableContext().getMethodVTableIndex(GD);
   uint64_t AddressPoint =
-    CGM.getVTableContext().getVTableLayout(RD)
+    CGM.getItaniumVTableContext().getVTableLayout(RD)
        .getAddressPoint(BaseSubobject(RD, CharUnits::Zero()));
   VTableIndex += AddressPoint;
   llvm::Value *VFuncPtr =
